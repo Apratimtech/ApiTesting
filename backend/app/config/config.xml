@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <security>
+        <jwtSecret>supersecretkey123</jwtSecret>
+        <jwtRefreshSecret>refreshsecret456</jwtRefreshSecret>
+        <apiKey>${TRUST_EDGE_API_KEY}</apiKey>
+    </security>
+
+    <database>
+        <driver>sqlite</driver>
+        <url>sqlite:///./trust_edge.db</url>
+    </database>
+
+    <redis>
+        <enabled>true</enabled>
+        <url>redis://localhost:6379</url>
+        <db>0</db>
+    </redis>
+
+    <smtp>
+        <host>smtp.gmail.com</host>
+        <port>587</port>
+        <username>your_email@gmail.com</username>
+        <password>your_password</password>
+        <from>your_email@gmail.com</from>
+        <tls>true</tls>
+    </smtp>
+
+    <ssl>
+        <enabled>true</enabled>
+        <certFile>certs/cert.pem</certFile>
+        <keyFile>certs/key.pem</keyFile>
+    </ssl>
+
+    <rateLimit>
+        <requestsPerMinute>60</requestsPerMinute>
+        <banSeconds>60</banSeconds>
+    </rateLimit>
+</config>
