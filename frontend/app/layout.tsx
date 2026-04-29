@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Sidebar />
               <div className="flex-1 flex flex-col">
                 <Topbar setIsLoggedIn={setIsLoggedIn} />
-                <motion.main 
+                <motion.main
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.6 }}
