@@ -14,78 +14,113 @@ import time
 from datetime import datetime
 import redis
 
-# -------------------------
-# SAFE CONFIG
-# -------------------------
+
+# =========================================================
+# 🔹 SAFE CONFIG
+# =========================================================
 def safe_get(section, key, default=None):
     try:
         return config.get(section, key)
     except Exception:
         return default
 
+
 API_KEY = safe_get("security", "apiKey")
 REDIS_URL = safe_get("redis", "url", "redis://localhost:6379")
-RATE_LIMIT_MAX = int(safe_get("rateLimit", "requestsPerMinute", 60))
-
-# -------------------------
-# LOGGING
-# -------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("trust_edge")
-
-# -------------------------
-# REDIS (Optional)
-# -------------------------
-redis_client = None
-try:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-    redis_client.ping()
-    logger.info("✅ Redis connected")
-except Exception as e:
-    logger.warning(f"⚠️ Redis unavailable: {e}")
-
-# -------------------------
-# APP
-# -------------------------
-app = FastAPI(
-    title="Trust_Edge API Security Analyzer",
-    version="2.0"
+RATE_LIMIT_MAX = int(
+    safe_get("rateLimit", "requestsPerMinute", 60)
 )
 
-# -------------------------
-# MIDDLEWARE
-# -------------------------
+
+# =========================================================
+# 🔹 LOGGING
+# =========================================================
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger("trust_edge")
+
+
+# =========================================================
+# 🔹 REDIS CONNECTION
+# =========================================================
+redis_client = None
+
+try:
+    redis_client = redis.from_url(
+        REDIS_URL,
+        decode_responses=True
+    )
+
+    redis_client.ping()
+
+    logger.info("✅ Redis connected")
+
+except Exception as e:
+
+    logger.warning(f"⚠️ Redis unavailable: {e}")
+
+
+# =========================================================
+# 🔹 FASTAPI APP
+# =========================================================
+app = FastAPI(
+    title="Trust_Edge API Security Analyzer",
+    description="Enterprise API Security Testing Platform",
+    version="2.0.0"
+)
+
+
+# =========================================================
+# 🔹 CORS MIDDLEWARE
+# =========================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # change in production
+    allow_origins=["*"],  # Change in production
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# =========================================================
+# 🔹 GZIP COMPRESSION
+# =========================================================
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1000
+)
 
 
-# -------------------------
-# RATE LIMIT MIDDLEWARE
-# -------------------------
+# =========================================================
+# 🔹 RATE LIMIT MIDDLEWARE
+# =========================================================
 class RedisRateLimitMiddleware(BaseHTTPMiddleware):
+
     async def dispatch(self, request: Request, call_next):
+
         if not redis_client:
             return await call_next(request)
 
         ip = request.client.host
-        key = f"rate:{ip}"
+
+        key = f"rate_limit:{ip}"
 
         try:
             count = redis_client.incr(key)
+
             if count == 1:
                 redis_client.expire(key, 60)
 
             if count > RATE_LIMIT_MAX:
+
                 return JSONResponse(
                     status_code=429,
-                    content={"success": False, "detail": "Rate limit exceeded"}
+                    content={
+                        "success": False,
+                        "detail": "Rate limit exceeded"
+                    }
                 )
+
         except Exception:
             pass
 
@@ -95,27 +130,39 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RedisRateLimitMiddleware)
 
 
-# -------------------------
-# REQUEST SIZE LIMIT
-# -------------------------
+# =========================================================
+# 🔹 REQUEST SIZE LIMIT
+# =========================================================
 @app.middleware("http")
-async def limit_size(request: Request, call_next):
+async def limit_request_size(
+    request: Request,
+    call_next
+):
+
     body = await request.body()
 
-    if len(body) > 2 * 1024 * 1024:  # 2MB
+    if len(body) > 2 * 1024 * 1024:
+
         return JSONResponse(
             status_code=413,
-            content={"success": False, "detail": "Request too large"}
+            content={
+                "success": False,
+                "detail": "Request too large"
+            }
         )
 
     return await call_next(request)
 
 
-# -------------------------
-# SECURITY HEADERS
-# -------------------------
+# =========================================================
+# 🔹 SECURITY HEADERS
+# =========================================================
 @app.middleware("http")
-async def security_headers(request: Request, call_next):
+async def add_security_headers(
+    request: Request,
+    call_next
+):
+
     response = await call_next(request)
 
     response.headers.update({
@@ -123,73 +170,141 @@ async def security_headers(request: Request, call_next):
         "X-Content-Type-Options": "nosniff",
         "X-XSS-Protection": "1; mode=block",
         "Referrer-Policy": "no-referrer",
-        "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+        "Strict-Transport-Security":
+            "max-age=31536000; includeSubDomains"
     })
 
     return response
 
 
-# -------------------------
-# API KEY CHECK
-# -------------------------
+# =========================================================
+# 🔹 API KEY VALIDATION
+# =========================================================
 @app.middleware("http")
-async def check_api_key(request: Request, call_next):
-    if request.url.path in ["/health", "/docs", "/redoc"]:
+async def validate_api_key(
+    request: Request,
+    call_next
+):
+
+    excluded_paths = [
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json"
+    ]
+
+    if request.url.path in excluded_paths:
         return await call_next(request)
 
     if API_KEY:
-        if request.headers.get("x-api-key") != API_KEY:
+
+        incoming_key = request.headers.get("x-api-key")
+
+        if incoming_key != API_KEY:
+
             return JSONResponse(
                 status_code=401,
-                content={"success": False, "detail": "Invalid API Key"}
+                content={
+                    "success": False,
+                    "detail": "Invalid API Key"
+                }
             )
 
     return await call_next(request)
 
 
-# -------------------------
-# LOGGING MIDDLEWARE
-# -------------------------
+# =========================================================
+# 🔹 REQUEST LOGGING
+# =========================================================
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = time.time()
+async def log_requests(
+    request: Request,
+    call_next
+):
+
+    start_time = time.time()
 
     response = await call_next(request)
 
-    duration = round(time.time() - start, 3)
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration}s)")
+    duration = round(
+        time.time() - start_time,
+        3
+    )
+
+    logger.info(
+        f"{request.method} "
+        f"{request.url.path} "
+        f"-> {response.status_code} "
+        f"({duration}s)"
+    )
 
     return response
 
 
-# -------------------------
-# ROUTES
-# -------------------------
-app.include_router(api_router, prefix="/api/v1")
+# =========================================================
+# 🔹 ROOT HEALTH ROUTE
+# =========================================================
+@app.get("/")
+async def root():
 
-# ✅ FIXED: Proper auth route prefix
-app.include_router(auth_router, prefix="/api/v1/auth")
-
-
-# -------------------------
-# HEALTH CHECK
-# -------------------------
-@app.get("/health")
-async def health():
     return {
-        "status": "ok",
-        "redis": bool(redis_client and redis_client.ping()),
-        "analyzer": "ready",
-        "time": datetime.utcnow().isoformat()
+        "success": True,
+        "service": "Trust_Edge API",
+        "version": "2.0.0",
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 
-# -------------------------
-# MAIN ANALYZER
-# -------------------------
+# =========================================================
+# 🔹 HEALTH CHECK
+# =========================================================
+@app.get("/health")
+async def health():
+
+    redis_status = False
+
+    try:
+        if redis_client:
+            redis_status = redis_client.ping()
+    except Exception:
+        redis_status = False
+
+    return {
+        "success": True,
+        "status": "healthy",
+        "redis": redis_status,
+        "analyzer": "ready",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+# =========================================================
+# 🔹 MAIN API ROUTERS
+# =========================================================
+app.include_router(
+    api_router,
+    prefix="/api/v1"
+)
+
+
+# =========================================================
+# 🔹 AUTH ROUTES
+# =========================================================
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth"
+)
+
+
+# =========================================================
+# 🔹 ANALYZER ENDPOINT
+# =========================================================
 @app.post("/api/v1/analyze")
 async def analyze_api(data: dict):
+
     try:
+
         result = analyzer.analyze_full_packet(
             data.get("request", {}),
             data.get("response", {})
@@ -199,16 +314,26 @@ async def analyze_api(data: dict):
             "success": True,
             "timestamp": datetime.utcnow().isoformat(),
             "findings": result.get("findings", []),
-            "overall_risk_score": result.get("overall_risk_score", 0),
-            "severity": result.get("severity", "LOW"),
-            "ai_suggestions": result.get("ai_suggestions", {}),
-            "summary": result.get("summary")
+            "overall_risk_score":
+                result.get("overall_risk_score", 0),
+            "severity":
+                result.get("severity", "LOW"),
+            "ai_suggestions":
+                result.get("ai_suggestions", {}),
+            "summary":
+                result.get("summary")
         }
 
     except Exception as e:
-        logger.error(f"Analyze endpoint error: {e}")
+
+        logger.error(
+            f"Analyze endpoint error: {str(e)}"
+        )
 
         return JSONResponse(
             status_code=500,
-            content={"success": False, "detail": "Internal Server Error"}
+            content={
+                "success": False,
+                "detail": "Internal Server Error"
+            }
         )

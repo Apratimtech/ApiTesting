@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,11 +13,11 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Trash2, Plus, Eye, Zap, Play, AlertTriangle, ShieldCheck } from "lucide-react";
+import { Trash2, Plus, Eye, Zap, Play, ShieldCheck, Download } from "lucide-react";
 import { saveScan } from "@/lib/history";
-import { Badge } from "@/components/ui/badge"; // assume you have this
+import { Badge } from "@/components/ui/badge";
 
-type BodyType = "none" | "json" | "raw" | "form-data" | "x-www-form-urlencoded" | "binary" | "graphql";
+type BodyType = "none" | "json" | "raw" | "form-data" | "x-www-form-urlencoded" | "graphql" | "html" | "javascript";
 
 export default function Analyzer() {
   const [method, setMethod] = useState("GET");
@@ -35,13 +35,57 @@ export default function Analyzer() {
 
   // Body
   const [bodyType, setBodyType] = useState<BodyType>("json");
-  const [body, setBody] = useState(`{\n  "title": "Test Post",\n  "body": "This is a test"\n}`);
+  const [body, setBody] = useState(`{\n "title": "Test Post",\n "body": "This is a test"\n}`);
+  const [graphqlVariables, setGraphqlVariables] = useState(`{\n "id": 1\n}`);
 
   // Results
   const [apiResponse, setApiResponse] = useState<any>(null);
   const [securityResult, setSecurityResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"response" | "security">("response");
+  const [responseView, setResponseView] = useState<"pretty" | "raw">("pretty");
+
+  // Load request when clicked from Sidebar
+  useEffect(() => {
+    const loadSavedRequest = () => {
+      const savedReq = localStorage.getItem("last_selected_request");
+      if (savedReq) {
+        try {
+          const req = JSON.parse(savedReq);
+          setMethod(req.method || "GET");
+          setUrl(req.url || "");
+          setAuthType(req.authType || "no-auth");
+          setBearer(req.bearer || "");
+          setBasicUser(req.basicUser || "");
+          setBasicPass(req.basicPass || "");
+          setApiKey(req.apiKey || "");
+          setHeaders(req.headers || [{ key: "Content-Type", value: "application/json" }]);
+          setBodyType(req.bodyType || "json");
+          setBody(req.body || "");
+          setGraphqlVariables(req.graphqlVariables || `{\n "id": 1\n}`);
+          localStorage.removeItem("last_selected_request");
+        } catch (e) {
+          console.error("Failed to load request", e);
+        }
+      }
+    };
+    loadSavedRequest();
+    const interval = setInterval(loadSavedRequest, 700);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Reset body when body type changes
+  useEffect(() => {
+    if (bodyType === "none") {
+      setBody("");
+    } else if (bodyType === "json" || bodyType === "graphql") {
+      setBody(`{\n "title": "Test Post",\n "body": "This is a test"\n}`);
+    } else if (bodyType === "raw" || bodyType === "html" || bodyType === "javascript") {
+      setBody(bodyType === "html" ? "<h1>Hello World</h1>" : "// JavaScript code here...");
+    } else if (bodyType === "form-data" || bodyType === "x-www-form-urlencoded") {
+      setBody("key1=value1&key2=value2");
+    }
+  }, [bodyType]);
 
   const handleSend = async () => {
     setLoading(true);
@@ -53,7 +97,25 @@ export default function Analyzer() {
       if (h.key?.trim()) headerObj[h.key.trim()] = h.value.trim();
     });
 
-    // Add Authorization
+    const hasContentType = Object.keys(headerObj).some(
+      key => key.toLowerCase() === "content-type"
+    );
+
+    if (!hasContentType) {
+      if (bodyType === "json" || bodyType === "graphql") {
+        headerObj["Content-Type"] = "application/json";
+      } else if (bodyType === "javascript") {
+        headerObj["Content-Type"] = "application/javascript";
+      } else if (bodyType === "html") {
+        headerObj["Content-Type"] = "text/html";
+      } else if (bodyType === "x-www-form-urlencoded") {
+        headerObj["Content-Type"] = "application/x-www-form-urlencoded";
+      } else if (bodyType === "raw") {
+        headerObj["Content-Type"] = "text/plain";
+      }
+    }
+
+    // Authorization
     if ((authType === "bearer" || authType === "jwt") && bearer.trim()) {
       headerObj["Authorization"] = `Bearer ${bearer.trim()}`;
     }
@@ -61,10 +123,9 @@ export default function Analyzer() {
       headerObj["Authorization"] = `Basic ${btoa(`${basicUser}:${basicPass}`)}`;
     }
     if (authType === "api-key" && apiKey.trim()) {
-      headerObj["x-api-key"] = apiKey.trim(); // or "Authorization" depending on API
+      headerObj["x-api-key"] = apiKey.trim();
     }
 
-    // Prepare body
     let finalBody: any = null;
     if (bodyType !== "none" && body.trim() && !["GET", "HEAD", "DELETE"].includes(method)) {
       try {
@@ -75,18 +136,20 @@ export default function Analyzer() {
     }
 
     const requestPayload = {
-      url,
+      id: Date.now().toString(),
       method,
+      url,
       headers: headerObj,
       body: finalBody,
     };
 
     try {
-      // 1. Call the actual target API
       const targetRes = await fetch(url, {
         method,
         headers: headerObj,
-        body: finalBody ? (typeof finalBody === "string" ? finalBody : JSON.stringify(finalBody)) : undefined,
+        body: finalBody
+          ? (typeof finalBody === "string" ? finalBody : JSON.stringify(finalBody))
+          : undefined,
       });
 
       const rawText = await targetRes.text();
@@ -102,24 +165,35 @@ export default function Analyzer() {
         statusText: targetRes.statusText,
         headers: Object.fromEntries(targetRes.headers.entries()),
         body: responseBody,
+        rawText: rawText,
       };
 
       setApiResponse(fullResponse);
 
-      // 2. Send to your security analyzer (send both request + response)
+      // ✅ YOUR REQUESTED BACKEND CALL
       const analyzeRes = await fetch("http://localhost:8000/api/v1/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          request: requestPayload,
-          response: fullResponse,
+          id: Date.now().toString(),
+          method,
+          url,
+          headers: headerObj,
+          body: finalBody,
         }),
       });
 
       const analyzeData = await analyzeRes.json();
-      setSecurityResult(analyzeData);
 
-      // Save to history
+      setSecurityResult({
+        findings: [],
+        overall_risk_score: 0,
+        severity: "LOW",
+        ...analyzeData,
+      });
+
       saveScan({
         id: Date.now(),
         url,
@@ -143,10 +217,20 @@ export default function Analyzer() {
     setHeaders(updated);
   };
 
-  const getRiskColor = (score: number) => {
-    if (score >= 8) return "bg-red-500";
-    if (score >= 5) return "bg-orange-500";
-    return "bg-green-500";
+  const downloadReport = () => {
+    if (!securityResult) return;
+    const report = {
+      ...securityResult,
+      generated_at: new Date().toISOString(),
+      analyzed_url: url,
+      method: method,
+      generated_by: "Trust_Edge Analyzer",
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `TrustEdge_Report_${new Date().toISOString().slice(0,10)}.json`;
+    link.click();
   };
 
   return (
@@ -157,15 +241,14 @@ export default function Analyzer() {
         </div>
         <div>
           <h1 className="text-5xl font-bold tracking-tighter text-white">Trust_Edge</h1>
-          <p className="text-slate-400 text-lg">API Security Analyzer • Postman + Security</p>
         </div>
       </div>
 
       {/* URL Bar */}
-      <Card className="glass neon-glow border-slate-700 bg-slate-950/80 backdrop-blur-xl">
+      <Card className="border-slate-700 bg-slate-950/90 backdrop-blur-xl">
         <CardContent className="p-6 flex gap-4 items-center">
           <Select value={method} onValueChange={setMethod}>
-            <SelectTrigger className="w-28 h-14">
+            <SelectTrigger className="w-32 h-14 text-lg font-medium">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -174,29 +257,30 @@ export default function Analyzer() {
               ))}
             </SelectContent>
           </Select>
-
           <Input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             className="flex-1 h-14 bg-slate-900 border-slate-700 text-lg font-mono"
             placeholder="https://api.example.com/endpoint"
           />
-
-          <Button onClick={handleSend} disabled={loading} className="h-14 px-10 bg-purple-600 hover:bg-purple-700">
+          <Button
+            onClick={handleSend}
+            disabled={loading}
+            className="h-14 px-12 bg-purple-600 hover:bg-purple-700 text-lg font-semibold"
+          >
             {loading ? "Analyzing..." : <><Play className="w-5 h-5 mr-2" /> Send & Analyze</>}
           </Button>
         </CardContent>
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-        {/* Request Configuration */}
-        <div className="lg:col-span-3">
-          <Card className="glass neon-glow h-full border-slate-700 bg-slate-950/80 backdrop-blur-xl">
+        <div className="lg:col-span-3 space-y-6">
+          <Card className="border-slate-700 bg-slate-950/90 backdrop-blur-xl">
             <CardHeader>
-              <CardTitle>Request Configuration</CardTitle>
+              <CardTitle className="text-2xl">Request Configuration</CardTitle>
             </CardHeader>
             <CardContent className="p-6">
-              <Tabs defaultValue="auth" className="w-full">
+              <Tabs defaultValue="body" className="w-full">
                 <TabsList className="grid grid-cols-3 mb-8 bg-slate-900 border border-slate-700 rounded-xl p-1">
                   <TabsTrigger value="auth">Authorization</TabsTrigger>
                   <TabsTrigger value="headers">Headers</TabsTrigger>
@@ -216,18 +300,15 @@ export default function Analyzer() {
                       <SelectItem value="jwt">JWT Token</SelectItem>
                     </SelectContent>
                   </Select>
-
                   {(authType === "bearer" || authType === "jwt") && (
-                    <Input value={bearer} onChange={(e) => setBearer(e.target.value)} placeholder="Paste token here..." className="font-mono" />
+                    <Input value={bearer} onChange={(e) => setBearer(e.target.value)} placeholder="Enter Bearer / JWT Token" className="font-mono" />
                   )}
-
                   {authType === "basic" && (
                     <div className="grid grid-cols-2 gap-4">
                       <Input value={basicUser} onChange={(e) => setBasicUser(e.target.value)} placeholder="Username" />
                       <Input type="password" value={basicPass} onChange={(e) => setBasicPass(e.target.value)} placeholder="Password" />
                     </div>
                   )}
-
                   {authType === "api-key" && (
                     <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" className="font-mono" />
                   )}
@@ -236,8 +317,8 @@ export default function Analyzer() {
                 <TabsContent value="headers" className="space-y-4">
                   {headers.map((h, i) => (
                     <div key={i} className="flex gap-3 items-center">
-                      <Input value={h.key} onChange={(e) => updateHeader(i, "key", e.target.value)} placeholder="Key" className="font-mono" />
-                      <Input value={h.value} onChange={(e) => updateHeader(i, "value", e.target.value)} placeholder="Value" className="font-mono" />
+                      <Input value={h.key} onChange={(e) => updateHeader(i, "key", e.target.value)} placeholder="Header Key" className="font-mono" />
+                      <Input value={h.value} onChange={(e) => updateHeader(i, "value", e.target.value)} placeholder="Header Value" className="font-mono" />
                       <Button variant="ghost" size="icon" onClick={() => removeHeader(i)}>
                         <Trash2 className="w-4 h-4" />
                       </Button>
@@ -249,14 +330,16 @@ export default function Analyzer() {
                 </TabsContent>
 
                 <TabsContent value="body" className="space-y-4">
-                  <Select value={bodyType} onValueChange={(value: BodyType) => setBodyType(value)}>
+                  <Select value={bodyType} onValueChange={(value) => setBodyType(value as BodyType)}>
                     <SelectTrigger className="h-12">
-                      <SelectValue />
+                      <SelectValue placeholder="Select body type" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">none</SelectItem>
                       <SelectItem value="json">JSON</SelectItem>
                       <SelectItem value="raw">Raw</SelectItem>
+                      <SelectItem value="html">HTML</SelectItem>
+                      <SelectItem value="javascript">JavaScript</SelectItem>
                       <SelectItem value="form-data">form-data</SelectItem>
                       <SelectItem value="x-www-form-urlencoded">x-www-form-urlencoded</SelectItem>
                       <SelectItem value="graphql">GraphQL</SelectItem>
@@ -264,12 +347,30 @@ export default function Analyzer() {
                   </Select>
 
                   {bodyType !== "none" && (
-                    <Textarea
-                      value={body}
-                      onChange={(e) => setBody(e.target.value)}
-                      className="min-h-[380px] font-mono bg-slate-950 border-slate-700 resize-y"
-                      placeholder="Request body..."
-                    />
+                    <div className="space-y-4">
+                      <Textarea
+                        value={body}
+                        onChange={(e) => setBody(e.target.value)}
+                        className="min-h-[320px] font-mono bg-slate-950 border-slate-700 resize-y text-sm"
+                        placeholder={
+                          bodyType === "html" ? "<h1>Hello World</h1>" :
+                          bodyType === "javascript" ? "// Write your JavaScript here" :
+                          bodyType === "graphql" ? "Write your GraphQL query..." :
+                          "Enter request body..."
+                        }
+                      />
+                      {bodyType === "graphql" && (
+                        <div>
+                          <p className="text-sm text-slate-400 mb-2">GraphQL Variables</p>
+                          <Textarea
+                            value={graphqlVariables}
+                            onChange={(e) => setGraphqlVariables(e.target.value)}
+                            className="min-h-[140px] font-mono bg-slate-950 border-slate-700"
+                            placeholder='{\n "id": 1\n}'
+                          />
+                        </div>
+                      )}
+                    </div>
                   )}
                 </TabsContent>
               </Tabs>
@@ -277,18 +378,11 @@ export default function Analyzer() {
           </Card>
         </div>
 
-        {/* Response & Security */}
+        {/* Response & Security Analysis */}
         <div className="lg:col-span-2">
-          <Card className="glass neon-glow h-full border-slate-700 bg-slate-950/80 backdrop-blur-xl">
+          <Card className="border-slate-700 bg-slate-950/90 backdrop-blur-xl h-full">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                Response & Analysis
-                {securityResult && (
-                  <Badge className={`${getRiskColor(securityResult.overall_risk_score)} text-white`}>
-                    Risk: {securityResult.overall_risk_score}/10
-                  </Badge>
-                )}
-              </CardTitle>
+              <CardTitle className="text-2xl">Response & Security Analysis</CardTitle>
             </CardHeader>
             <CardContent className="p-6">
               <Tabs value={activeTab} onValueChange={(v: any) => setActiveTab(v)}>
@@ -297,64 +391,119 @@ export default function Analyzer() {
                   <TabsTrigger value="security">Security Analysis</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="response" className="min-h-[400px]">
+                <TabsContent value="response" className="min-h-[420px]">
                   {!apiResponse ? (
-                    <div className="flex flex-col items-center justify-center h-full text-slate-500">
-                      <Eye className="w-16 h-16 mb-4 opacity-40" />
-                      <p>Send request to see response</p>
+                    <div className="flex flex-col items-center justify-center h-full text-slate-500 py-12">
+                      <Eye className="w-20 h-20 mb-6 opacity-40" />
+                      <p className="text-xl">Send request to see response</p>
                     </div>
                   ) : apiResponse.error ? (
-                    <p className="text-red-400">{apiResponse.error}</p>
+                    <p className="text-red-400 text-lg">{apiResponse.error}</p>
                   ) : (
                     <div className="space-y-4">
-                      <div className="flex gap-4">
+                      <div className="flex justify-between items-center">
                         <div className="text-2xl font-mono">
                           {apiResponse.status} {apiResponse.statusText}
                         </div>
+                        <Select value={responseView} onValueChange={(v: "pretty" | "raw") => setResponseView(v)}>
+                          <SelectTrigger className="w-40">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="pretty">Pretty</SelectItem>
+                            <SelectItem value="raw">Raw</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
-                      <pre className="bg-black p-6 rounded-xl text-sm overflow-auto max-h-[500px]">
-                        {JSON.stringify(apiResponse, null, 2)}
-                      </pre>
+                      {responseView === "pretty" ? (
+                        <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800">
+                          {JSON.stringify(apiResponse, null, 2)}
+                        </pre>
+                      ) : (
+                        <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
+                          {apiResponse.rawText || JSON.stringify(apiResponse, null, 2)}
+                        </pre>
+                      )}
                     </div>
                   )}
                 </TabsContent>
 
-                <TabsContent value="security" className="min-h-[400px]">
+                <TabsContent value="security" className="min-h-[420px] space-y-6">
                   {!securityResult ? (
-                    <div className="flex flex-col items-center justify-center h-full text-slate-500">
-                      <ShieldCheck className="w-16 h-16 mb-4 opacity-40" />
-                      <p>Security analysis will appear here</p>
+                    <div className="flex flex-col items-center justify-center h-full text-slate-500 py-16">
+                      <ShieldCheck className="w-20 h-20 mb-6 opacity-40" />
+                      <p className="text-2xl font-medium">Security Analysis</p>
+                      <p className="text-slate-400 mt-2">Send request to analyze vulnerabilities</p>
                     </div>
-                  ) : securityResult.error ? (
-                    <p className="text-red-400">{securityResult.error}</p>
                   ) : (
-                    <div className="space-y-6">
-                      <div>
-                        <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
-                          <AlertTriangle className="w-5 h-5" /> Findings ({securityResult.findings?.length || 0})
-                        </h3>
-                        <div className="space-y-3">
-                          {securityResult.findings?.map((f: any, i: number) => (
-                            <div key={i} className="p-4 bg-slate-900 rounded-xl border border-slate-700">
-                              <div className="flex justify-between">
-                                <p className="font-medium">{f.issue}</p>
-                                <Badge variant={f.severity >= 8 ? "destructive" : f.severity >= 5 ? "default" : "secondary"}>
-                                  Severity: {f.severity}
-                                </Badge>
-                              </div>
-                              {f.description && <p className="text-sm text-slate-400 mt-1">{f.description}</p>}
-                              {f.category && <p className="text-xs text-purple-400 mt-2">Category: {f.category}</p>}
+                    <div className="space-y-8">
+                      <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-700 rounded-3xl p-8">
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                          <div>
+                            <p className="text-sm text-slate-400 mb-1">OVERALL RISK SCORE</p>
+                            <div className="flex items-baseline gap-3">
+                              <span className={`text-7xl font-bold tracking-tighter ${
+                                securityResult.overall_risk_score >= 8 ? 'text-red-500' :
+                                securityResult.overall_risk_score >= 6 ? 'text-orange-500' : 'text-green-500'
+                              }`}>
+                                {securityResult.overall_risk_score}
+                              </span>
+                              <span className="text-4xl text-slate-500">/10</span>
                             </div>
-                          ))}
+                            <p className="text-2xl font-semibold mt-2">
+                              {securityResult.severity || "MEDIUM"} RISK LEVEL
+                            </p>
+                          </div>
+                          <Button
+                            onClick={downloadReport}
+                            className="bg-purple-600 hover:bg-purple-700 px-8 py-6 text-lg flex items-center gap-2"
+                          >
+                            <Download className="w-5 h-5" />
+                            Download Full Report
+                          </Button>
                         </div>
                       </div>
 
-                      {securityResult.ai_suggestions && (
-                        <div>
-                          <h3 className="text-lg font-semibold mb-2">AI Suggestions</h3>
-                          <pre className="bg-black p-4 rounded-xl text-sm">{JSON.stringify(securityResult.ai_suggestions, null, 2)}</pre>
+                      <div>
+                        <div className="flex items-center justify-between mb-6">
+                          <h3 className="text-2xl font-semibold">Vulnerability Findings</h3>
+                          <p className="text-slate-400">
+                            {securityResult.findings?.length || 0} issues detected
+                          </p>
                         </div>
-                      )}
+                        {securityResult.findings && securityResult.findings.length > 0 ? (
+                          <div className="space-y-5">
+                            {securityResult.findings
+                              .sort((a: any, b: any) => (b.severity || 0) - (a.severity || 0))
+                              .map((f: any, i: number) => (
+                                <div key={i} className="bg-slate-900 border border-slate-700 rounded-2xl p-7 hover:border-slate-600 transition-all">
+                                  <div className="flex justify-between items-start mb-5">
+                                    <div className="flex-1">
+                                      <h4 className="text-xl font-semibold text-white">{f.issue}</h4>
+                                      <p className="text-purple-400 text-sm mt-1">Category: {f.category}</p>
+                                    </div>
+                                    <Badge className={`${f.severity >= 8 ? 'bg-red-500' : f.severity >= 6 ? 'bg-orange-500' : 'bg-yellow-500'} text-white`}>
+                                      {f.severity}/10
+                                    </Badge>
+                                  </div>
+                                  <p className="text-slate-300 leading-relaxed mb-6">{f.description}</p>
+                                  {f.recommendation && (
+                                    <div className="bg-slate-800 border-l-4 border-purple-500 pl-5 py-4 rounded-r-xl">
+                                      <p className="text-purple-400 font-medium text-sm mb-1">RECOMMENDATION</p>
+                                      <p className="text-slate-200">{f.recommendation}</p>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                          </div>
+                        ) : (
+                          <div className="text-center py-16 text-green-400">
+                            <ShieldCheck className="w-16 h-16 mx-auto mb-4" />
+                            <p className="text-2xl font-medium">No vulnerabilities detected</p>
+                            <p className="text-slate-500 mt-2">Your API request looks secure</p>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </TabsContent>
