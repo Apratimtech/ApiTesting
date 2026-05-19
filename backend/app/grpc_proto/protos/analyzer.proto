@@ -1,0 +1,365 @@
+syntax = "proto3";
+
+package analyzer;
+
+// =========================================================
+// TRUST_EDGE GOVERNMENT + ENTERPRISE SECURITY ENGINE
+// Advanced OWASP Top 10 Threat Detection Platform
+// =========================================================
+
+service AnalyzerService {
+
+  // =======================================================
+  // MAIN ANALYZER
+  // =======================================================
+  rpc Analyze (AnalyzeRequest)
+      returns (AnalyzeResponse);
+
+  // =======================================================
+  // BULK ANALYSIS
+  // =======================================================
+  rpc BulkAnalyze (BulkAnalyzeRequest)
+      returns (BulkAnalyzeResponse);
+
+  // =======================================================
+  // REALTIME STREAM ANALYSIS
+  // =======================================================
+  rpc StreamAnalyze (stream AnalyzeRequest)
+      returns (stream AnalyzeResponse);
+
+  // =======================================================
+  // SECURITY HEALTH
+  // =======================================================
+  rpc HealthCheck (HealthRequest)
+      returns (HealthResponse);
+
+  // =======================================================
+  // THREAT INTELLIGENCE
+  // =======================================================
+  rpc ThreatIntel (ThreatIntelRequest)
+      returns (ThreatIntelResponse);
+}
+
+
+// =========================================================
+// MAIN REQUEST
+// =========================================================
+
+message AnalyzeRequest {
+
+  // -------------------------------------------------------
+  // BASIC REQUEST INFO
+  // -------------------------------------------------------
+
+  string request_id = 1;
+
+  string target = 2;
+
+  string method = 3;
+
+  string endpoint = 4;
+
+  string protocol = 5;
+
+  string body = 6;
+
+  map<string, string> headers = 7;
+
+  map<string, string> query_params = 8;
+
+  string content_type = 9;
+
+  int64 timestamp = 10;
+
+  // -------------------------------------------------------
+  // CLIENT INFO
+  // -------------------------------------------------------
+
+  string client_ip = 11;
+
+  string user_agent = 12;
+
+  string geo_location = 13;
+
+  string device_id = 14;
+
+  string session_id = 15;
+
+  string auth_token = 16;
+
+  // -------------------------------------------------------
+  // SECURITY FLAGS
+  // -------------------------------------------------------
+
+  bool enable_ai_detection = 17;
+
+  bool enable_owasp_scan = 18;
+
+  bool enable_malware_scan = 19;
+
+  bool enable_dlp_scan = 20;
+
+  bool enable_behavior_analysis = 21;
+
+  bool enable_bot_detection = 22;
+
+  // -------------------------------------------------------
+  // ENTERPRISE METADATA
+  // -------------------------------------------------------
+
+  string environment = 23;
+
+  string source_system = 24;
+
+  string organization = 25;
+
+  string tenant_id = 26;
+
+  map<string, string> metadata = 27;
+}
+
+
+// =========================================================
+// MAIN RESPONSE
+// =========================================================
+
+message AnalyzeResponse {
+
+  bool success = 1;
+
+  string request_id = 2;
+
+  string analysis_id = 3;
+
+  string status = 4;
+
+  string message = 5;
+
+  // -------------------------------------------------------
+  // RISK ANALYSIS
+  // -------------------------------------------------------
+
+  int32 risk_score = 6;
+
+  string severity = 7;
+
+  bool blocked = 8;
+
+  string action_taken = 9;
+
+  // -------------------------------------------------------
+  // OWASP RESULTS
+  // -------------------------------------------------------
+
+  OWASPTop10 owasp = 10;
+
+  // -------------------------------------------------------
+  // THREATS
+  // -------------------------------------------------------
+
+  repeated Threat threats = 11;
+
+  repeated Vulnerability vulnerabilities = 12;
+
+  repeated Recommendation recommendations = 13;
+
+  // -------------------------------------------------------
+  // SECURITY METRICS
+  // -------------------------------------------------------
+
+  SecurityMetrics metrics = 14;
+
+  // -------------------------------------------------------
+  // SYSTEM INFO
+  // -------------------------------------------------------
+
+  double latency_ms = 15;
+
+  string engine_version = 16;
+
+  int64 analyzed_at = 17;
+}
+
+
+// =========================================================
+// OWASP TOP 10
+// =========================================================
+
+message OWASPTop10 {
+
+  bool broken_access_control = 1;
+
+  bool cryptographic_failures = 2;
+
+  bool injection = 3;
+
+  bool insecure_design = 4;
+
+  bool security_misconfiguration = 5;
+
+  bool vulnerable_components = 6;
+
+  bool authentication_failures = 7;
+
+  bool software_integrity_failures = 8;
+
+  bool logging_monitoring_failures = 9;
+
+  bool ssrf = 10;
+}
+
+
+// =========================================================
+// THREAT
+// =========================================================
+
+message Threat {
+
+  string id = 1;
+
+  string name = 2;
+
+  string category = 3;
+
+  string severity = 4;
+
+  string description = 5;
+
+  bool malicious = 6;
+
+  double confidence = 7;
+
+  string detection_engine = 8;
+
+  string remediation = 9;
+}
+
+
+// =========================================================
+// VULNERABILITY
+// =========================================================
+
+message Vulnerability {
+
+  string cve_id = 1;
+
+  string title = 2;
+
+  string severity = 3;
+
+  double cvss_score = 4;
+
+  string affected_component = 5;
+
+  string remediation = 6;
+}
+
+
+// =========================================================
+// RECOMMENDATIONS
+// =========================================================
+
+message Recommendation {
+
+  string title = 1;
+
+  string description = 2;
+
+  string priority = 3;
+
+  string category = 4;
+}
+
+
+// =========================================================
+// SECURITY METRICS
+// =========================================================
+
+message SecurityMetrics {
+
+  int32 malicious_patterns = 1;
+
+  int32 suspicious_headers = 2;
+
+  int32 sql_injection_attempts = 3;
+
+  int32 xss_attempts = 4;
+
+  int32 csrf_attempts = 5;
+
+  int32 auth_failures = 6;
+
+  int32 rate_limit_violations = 7;
+
+  int32 sensitive_data_exposures = 8;
+
+  int32 malware_hits = 9;
+
+  int32 blocked_requests = 10;
+}
+
+
+// =========================================================
+// BULK ANALYSIS
+// =========================================================
+
+message BulkAnalyzeRequest {
+
+  repeated AnalyzeRequest requests = 1;
+}
+
+message BulkAnalyzeResponse {
+
+  repeated AnalyzeResponse responses = 1;
+
+  int32 total_requests = 2;
+
+  int32 malicious_requests = 3;
+
+  int32 blocked_requests = 4;
+}
+
+
+// =========================================================
+// HEALTH CHECK
+// =========================================================
+
+message HealthRequest {}
+
+message HealthResponse {
+
+  bool healthy = 1;
+
+  string version = 2;
+
+  int64 uptime_seconds = 3;
+
+  double cpu_usage = 4;
+
+  double memory_usage = 5;
+
+  int32 active_connections = 6;
+}
+
+
+// =========================================================
+// THREAT INTELLIGENCE
+// =========================================================
+
+message ThreatIntelRequest {
+
+  string indicator = 1;
+}
+
+message ThreatIntelResponse {
+
+  bool found = 1;
+
+  string threat_type = 2;
+
+  string reputation = 3;
+
+  repeated string tags = 4;
+
+  string source = 5;
+}

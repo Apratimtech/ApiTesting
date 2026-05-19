@@ -1,0 +1,202 @@
+import asyncio
+import logging
+import signal
+from concurrent import futures
+
+import grpc
+
+from app.grpc_proto.generated import (
+    analyzer_pb2_grpc,
+)
+
+from app.grpc_proto.services.analyzer_service import (
+    AnalyzerService,
+)
+
+from app.grpc_proto.interceptor import (
+    LoggingInterceptor,
+)
+
+# =========================================================
+# LOGGING CONFIG
+# =========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=(
+        "[%(asctime)s] "
+        "[%(levelname)s] "
+        "[gRPC] "
+        "%(message)s"
+    ),
+)
+
+logger = logging.getLogger("grpc-server")
+
+# =========================================================
+# SERVER CONFIG
+# =========================================================
+
+GRPC_HOST = "[::]:50051"
+
+MAX_WORKERS = 20
+
+MAX_MESSAGE_LENGTH = 50 * 1024 * 1024  # 50MB
+
+KEEPALIVE_OPTIONS = [
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_permit_without_calls", True),
+    ("grpc.http2.max_pings_without_data", 0),
+    ("grpc.http2.min_time_between_pings_ms", 10000),
+    ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+    ("grpc.max_send_message_length", MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", MAX_MESSAGE_LENGTH),
+]
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+
+
+async def startup_checks():
+
+    logger.info("Running startup checks...")
+
+    try:
+        logger.info("Checking AnalyzerService...")
+        AnalyzerService()
+
+        logger.info("Startup checks completed successfully")
+
+    except Exception as e:
+        logger.exception(
+            f"Startup validation failed: {str(e)}"
+        )
+        raise
+
+
+# =========================================================
+# SHUTDOWN HANDLER
+# =========================================================
+
+
+async def graceful_shutdown(server):
+
+    logger.warning(
+        "Graceful shutdown initiated..."
+    )
+
+    await server.stop(grace=10)
+
+    logger.warning(
+        "gRPC server shutdown completed"
+    )
+
+
+# =========================================================
+# MAIN SERVER
+# =========================================================
+
+
+async def serve():
+
+    await startup_checks()
+
+    logger.info(
+        "Initializing secure gRPC server..."
+    )
+
+    server = grpc.aio.server(
+        futures.ThreadPoolExecutor(
+            max_workers=MAX_WORKERS
+        ),
+        interceptors=[
+            LoggingInterceptor(),
+        ],
+        options=KEEPALIVE_OPTIONS,
+    )
+
+    # =====================================================
+    # REGISTER SERVICES
+    # =====================================================
+
+    analyzer_pb2_grpc.add_AnalyzerServiceServicer_to_server(
+        AnalyzerService(),
+        server
+    )
+
+    # =====================================================
+    # PORT BINDING
+    # =====================================================
+
+    server.add_insecure_port(GRPC_HOST)
+
+    logger.info(
+        f"gRPC server running on {GRPC_HOST}"
+    )
+
+    # =====================================================
+    # START SERVER
+    # =====================================================
+
+    await server.start()
+
+    logger.info(
+        "AnalyzerService successfully registered"
+    )
+
+    logger.info(
+        "Server ready for enterprise RPC traffic"
+    )
+
+    # =====================================================
+    # SIGNAL HANDLING
+    # =====================================================
+
+    loop = asyncio.get_running_loop()
+
+    shutdown_event = asyncio.Event()
+
+    def stop_server():
+
+        logger.warning(
+            "Shutdown signal received"
+        )
+
+        shutdown_event.set()
+
+    for sig in (
+        signal.SIGINT,
+        signal.SIGTERM,
+    ):
+        loop.add_signal_handler(
+            sig,
+            stop_server
+        )
+
+    await shutdown_event.wait()
+
+    await graceful_shutdown(server)
+
+
+# =========================================================
+# ENTRYPOINT
+# =========================================================
+
+if __name__ == "__main__":
+
+    try:
+        asyncio.run(serve())
+
+    except KeyboardInterrupt:
+
+        logger.warning(
+            "Server interrupted manually"
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            f"Fatal gRPC server error: {str(e)}"
+        )

@@ -9,6 +9,10 @@ from app.api.v1.endpoints import (
     history
 )
 
+from app.mqtt.router import (
+    router as mqtt_router
+)
+
 # =========================================================
 # 🔹 MAIN API ROUTER
 # =========================================================
@@ -75,4 +79,12 @@ api_router.include_router(
     history.router,
     prefix="/history",
     tags=["History"]
+)
+
+
+# =========================================================
+# 🔹 MQTT ROUTER
+# =========================================================
+api_router.include_router(
+    mqtt_router
 )
