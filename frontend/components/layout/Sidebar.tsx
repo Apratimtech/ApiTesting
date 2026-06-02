@@ -55,7 +55,7 @@ type Collection = {
 
 const PROTOCOLS = [
   { name: "HTTP", icon: "🌐", color: "#60a5fa", defaultMethod: "GET", route: "/analyzer/http" },
-  { name: "GraphQL", icon: "⚡", color: "#f472b6", defaultMethod: "POST", route: "/analyzer" },
+  { name: "GraphQL", icon: "⚡", color: "#f472b6", defaultMethod: "POST", route: "/analyzer/graphql" },
   { name: "WebSocket", icon: "🔌", color: "#34d399", defaultMethod: "GET", route: "/analyzer/websocket" },
   { name: "gRPC", icon: "🔄", color: "#22d3ee", defaultMethod: "POST", route: "/analyzer/grpc" },
   { name: "MQTT", icon: "📡", color: "#a78bfa", defaultMethod: "PUBLISH", route: "/analyzer/mqtt" },

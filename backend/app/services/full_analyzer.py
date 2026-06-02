@@ -2,839 +2,258 @@ import jwt
 import json
 import re
 import os
+import math
 import logging
-from datetime import datetime, timezone
-from typing import Dict, List, Set
+import traceback
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Any
 
-from presidio_analyzer import AnalyzerEngine
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 logger = logging.getLogger("TrustEdgeAnalyzer")
 
-# ==========================================================
-# GROQ AI (Optional)
-# ==========================================================
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Optional Dependencies
+try:
+    from presidio_analyzer import AnalyzerEngine
+    _presidio = AnalyzerEngine()
+except Exception:
+    _presidio = None
 
-groq_client = None
-
-if GROQ_API_KEY:
+_groq_client = None
+if os.getenv("GROQ_API_KEY"):
     try:
         from groq import Groq
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    except Exception:
+        pass
 
-        groq_client = Groq(api_key=GROQ_API_KEY)
-        logger.info("Groq AI Enabled")
+_PUBLIC_TEST_HOSTS = re.compile(r"(httpbin|jsonplaceholder|reqres|postman-echo|mockapi|beeceptor|webhook)", re.I)
 
-    except Exception as e:
-        logger.warning(f"Groq initialization failed: {e}")
+_SEVERITY_WEIGHT = {"CRITICAL": 10, "HIGH": 6, "MEDIUM": 3, "LOW": 1}
 
-# ==========================================================
-# PRESIDIO ANALYZER
-# ==========================================================
-analyzer_engine = AnalyzerEngine()
+_STRONG_ALGS = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256"}
+_ACCEPTABLE_ALGS = _STRONG_ALGS | {"HS256"}
 
-# ==========================================================
-# TRUST EDGE ANALYZER
-# ==========================================================
+_MAX_BODY_LEN = 80000
+
+def _finding(issue: str, description: str, severity: str, category: str, recommendation: str = "", owasp: str = "", cwe: str = ""):
+    return {
+        "issue": issue,
+        "description": description,
+        "severity": severity.upper(),
+        "category": category,
+        "recommendation": recommendation,
+        "owasp": owasp,
+        "cwe": cwe
+    }
+
 class TrustEdgeAnalyzer:
 
-    # ======================================================
-    # MAIN ANALYZE
-    # ======================================================
     def analyze(self, payload: Dict) -> Dict:
-
-        logger.info("=" * 80)
-        logger.info("NEW ANALYSIS REQUEST")
-        logger.info("=" * 80)
-
         try:
-            logger.debug(f"FULL PAYLOAD:\n{json.dumps(payload, indent=2, default=str)}")
+            request = payload.get("request", {}) if isinstance(payload.get("request"), dict) else payload
+            response = payload.get("response", {}) if isinstance(payload.get("response"), dict) else {}
 
-            # FIXED PAYLOAD EXTRACTION
-            request = payload.get("request", payload)
-            response = payload.get("response", {})
+            url = str(request.get("url", "")).strip()
+            method = str(request.get("method", "GET")).upper()
+            is_test_host = bool(_PUBLIC_TEST_HOSTS.search(url))
 
-            logger.info(f"REQUEST METHOD: {request.get('method')}")
-            logger.info(f"REQUEST URL: {request.get('url')}")
-            logger.info(f"REQUEST HEADERS: {request.get('headers')}")
+            findings = self._analyze_packet(request, response, is_test_host)
 
-            return self.analyze_full_packet(request, response)
+            if _groq_client and findings:
+                ai = self._groq_enhance(request, findings)
+                if ai:
+                    findings.append(ai)
 
+            findings = self._deduplicate(findings)
+            risk = self._risk_score(findings)
+
+            return {
+                "success": True,
+                "generated_by": "Trust_Edge Analyzer v2.4",
+                "method": method,
+                "analyzed_url": url,
+                "overall_risk_score": risk["score"],
+                "severity": risk["highest"],
+                "findings": sorted(findings, key=lambda f: _SEVERITY_WEIGHT.get(f["severity"], 0), reverse=True),
+                "summary": f"{len(findings)} security finding(s)",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
         except Exception as e:
-            logger.error(f"Analyzer Error: {e}", exc_info=True)
-
+            logger.error(traceback.format_exc())
             return {
                 "success": False,
                 "error": str(e),
-                "findings": [],
-                "summary": "Analyzer failed",
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "severity": "LOW",
+                "findings": []
             }
 
-    # ======================================================
-    # FULL PACKET ANALYSIS
-    # ======================================================
-    def analyze_full_packet(self, request: Dict, response: Dict) -> Dict:
-
-        findings: List[Dict] = []
-
-        findings.extend(self._authentication_analysis(request))
-        findings.extend(self._jwt_security_analysis(request))
-        findings.extend(self._transport_security_analysis(request))
-        findings.extend(self._security_headers_analysis(response))
-        findings.extend(self._plaintext_analysis(request, response))
-        findings.extend(self._sensitive_data_analysis(request, response))
-        findings.extend(self._graphql_analysis(request))
-        findings.extend(self._rate_limit_analysis(response))
-        findings.extend(self._server_leak_analysis(response))
-        findings.extend(self._error_analysis(response))
-        findings.extend(self._injection_analysis(request))
-        findings.extend(self._ai_prompt_injection_analysis(request))
-        findings.extend(self._file_upload_analysis(request))
-        findings.extend(self._cors_analysis(response))
-        findings.extend(self._cookie_analysis(response))
-        findings.extend(self._http_method_analysis(request))
-        findings.extend(self._content_type_analysis(request))
-        findings.extend(self._path_analysis(request))
-        findings.extend(self._suspicious_pattern_analysis(request))
-        findings.extend(self._token_exposure_analysis(request, response))
-
-        findings = self._deduplicate_findings(findings)
-
-        risk = self._calculate_risk_score(findings)
-
-        return {
-            "success": True,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "generated_by": "Trust_Edge Analyzer",
-            "method": request.get("method"),
-            "analyzed_url": request.get("url"),
-            "overall_risk_score": risk["overall_risk_score"],
-            "severity": risk["severity"],
-            "findings": findings,
-            "summary": f"{len(findings)} security findings detected"
-        }
-
-    # ======================================================
-    # NORMALIZE HEADERS
-    # ======================================================
-    def _normalize_headers(self, headers: Dict) -> Dict:
-
-        if not isinstance(headers, dict):
-            return {}
-
-        return {
-            str(k).lower(): str(v)
-            for k, v in headers.items()
-        }
-
-    # ======================================================
-    # DEDUPLICATION
-    # ======================================================
-    def _deduplicate_findings(self, findings: List[Dict]) -> List[Dict]:
-
-        seen: Set[str] = set()
-        unique = []
-
-        for finding in findings:
-
-            key = (
-                f"{finding.get('issue')}|"
-                f"{finding.get('category')}|"
-                f"{finding.get('severity')}"
-            )
-
-            if key not in seen:
-                seen.add(key)
-                unique.append(finding)
-
-        return unique
-
-    # ======================================================
-    # RISK SCORE
-    # ======================================================
-    def _calculate_risk_score(self, findings: List[Dict]) -> Dict:
-
-        severity_weights = {
-            "CRITICAL": 10,
-            "HIGH": 7,
-            "MEDIUM": 5,
-            "LOW": 2,
-            "INFO": 0
-        }
-
-        total_score = 0
-        highest = "LOW"
-
-        for finding in findings:
-
-            sev = finding.get("severity", "LOW").upper()
-
-            total_score += severity_weights.get(sev, 0)
-
-            if severity_weights.get(sev, 0) > severity_weights.get(highest, 0):
-                highest = sev
-
-        normalized = min(total_score * 4, 100)
-
-        return {
-            "overall_risk_score": normalized,
-            "severity": highest
-        }
-
-    # ======================================================
-    # AUTHENTICATION ANALYSIS
-    # ======================================================
-    def _authentication_analysis(self, request: Dict) -> List[Dict]:
-
+    def _analyze_packet(self, request: Dict, response: Dict, is_test_host: bool) -> List[Dict]:
         findings = []
-
-        headers = self._normalize_headers(request.get("headers", {}))
-
-        logger.info(f"NORMALIZED HEADERS: {headers}")
-
-        auth = headers.get("authorization", "").strip()
-
-        logger.info(f"AUTHORIZATION HEADER: {auth}")
-
-        if not auth:
-
-            findings.append({
-                "issue": "Missing Authentication",
-                "description": "No authentication mechanism detected in request.",
-                "severity": "CRITICAL",
-                "category": "Authentication",
-                "owasp": "API2:2023",
-                "cwe": "CWE-306",
-                "recommendation": "Implement OAuth2, JWT, API Keys, or session authentication."
-            })
-
-            return findings
-
-        # BEARER AUTH
-        if auth.lower().startswith("bearer "):
-
-            token = auth[7:].strip()
-
-            if token:
-
-                findings.append({
-                    "issue": "Bearer Authentication Detected",
-                    "description": "Bearer token authentication detected.",
-                    "severity": "INFO",
-                    "category": "Authentication"
-                })
-
-            else:
-
-                findings.append({
-                    "issue": "Empty Bearer Token",
-                    "description": "Bearer token is empty.",
-                    "severity": "HIGH",
-                    "category": "Authentication",
-                    "recommendation": "Provide a valid bearer token."
-                })
-
-        # BASIC AUTH
-        elif auth.lower().startswith("basic "):
-
-            findings.append({
-                "issue": "Basic Authentication Detected",
-                "description": "Basic authentication detected.",
-                "severity": "INFO",
-                "category": "Authentication",
-                "recommendation": "Prefer OAuth2 or JWT over Basic Auth."
-            })
-
-        else:
-
-            findings.append({
-                "issue": "Custom Authentication Header",
-                "description": "Authentication header detected.",
-                "severity": "INFO",
-                "category": "Authentication"
-            })
-
+        findings += self._check_transport_security(request)
+        findings += self._check_authentication(request)
+        findings += self._check_bearer_token(request)
+        findings += self._check_jwt_detailed(request)
+        findings += self._check_security_headers(response, is_test_host)
+        findings += self._check_plaintext_credentials(request, response)
+        findings += self._check_pii(request, response)
+        findings += self._check_rate_limiting(response, is_test_host)
+        findings += self._check_injection(request)
+        findings += self._check_token_exposure(request, response)
+        findings += self._check_sensitive_paths(request)
+        findings += self._check_suspicious_payloads(request)
         return findings
 
-    # ======================================================
-    # JWT ANALYSIS
-    # ======================================================
-    def _jwt_security_analysis(self, request: Dict) -> List[Dict]:
-
-        findings = []
-
-        headers = self._normalize_headers(request.get("headers", {}))
-
-        auth = headers.get("authorization", "")
-
-        if not auth.lower().startswith("bearer "):
-            return findings
-
-        token = auth[7:].strip()
-
-        if not token:
-            return findings
-
-        if len(token.split(".")) != 3:
-
-            findings.append({
-                "issue": "Invalid JWT Structure",
-                "description": "JWT token does not contain 3 sections.",
-                "severity": "HIGH",
-                "category": "JWT Security"
-            })
-
-            return findings
-
+    def _groq_enhance(self, request, findings):
         try:
-
-            header = jwt.get_unverified_header(token)
-
-            jwt.decode(
-                token,
-                options={
-                    "verify_signature": False
-                }
+            prompt = f"API Security Insight: URL {request.get('url')} | Findings: {[f['issue'] for f in findings]}"
+            resp = _groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100
             )
+            return _finding("AI Security Insight", resp.choices[0].message.content[:200], "MEDIUM", "AI Analysis")
+        except:
+            return None
 
-            alg = header.get("alg", "unknown")
+    # ==================== HELPERS ====================
+    def _headers(self, obj):
+        h = obj.get("headers", {}) or {}
+        return {str(k).lower().strip(): str(v).strip() for k, v in h.items() if v is not None}
 
-            if alg.lower() == "none":
+    def _body_text(self, obj):
+        if not obj: return ""
+        b = obj.get("body") or obj.get("rawText", "")
+        if isinstance(b, (dict, list)):
+            try: return json.dumps(b)[:_MAX_BODY_LEN]
+            except: pass
+        return str(b)[:_MAX_BODY_LEN]
 
-                findings.append({
-                    "issue": "JWT Uses NONE Algorithm",
-                    "description": "JWT token uses insecure NONE algorithm.",
-                    "severity": "CRITICAL",
-                    "category": "JWT Security",
-                    "recommendation": "Use RS256 or ES256."
-                })
+    def _deduplicate(self, findings):
+        seen = set()
+        return [f for f in findings if (k := f"{f['issue']}|{f['category']}") not in seen and not seen.add(k)]
 
-            elif alg not in ["RS256", "ES256", "HS256"]:
+    def _risk_score(self, findings):
+        raw = sum(_SEVERITY_WEIGHT.get(f.get("severity"), 0) for f in findings)
+        score = round(100 * (1 - math.exp(-0.07 * raw)))
+        highest = max(findings, key=lambda f: _SEVERITY_WEIGHT.get(f.get("severity"), 0), default={"severity": "LOW"})
+        return {"score": score, "highest": highest["severity"]}
 
-                findings.append({
-                    "issue": "Weak JWT Algorithm",
-                    "description": f"JWT uses weak algorithm: {alg}",
-                    "severity": "HIGH",
-                    "category": "JWT Security",
-                    "recommendation": "Use RS256 or ES256."
-                })
+    # ==================== SECURITY CHECKS ====================
 
+    def _check_transport_security(self, request):
+        """Plain HTTP detection"""
+        if str(request.get("url", "")).lower().startswith("http://"):
+            return [_finding("Insecure HTTP", "Data sent unencrypted", "CRITICAL", "Transport Security", owasp="API8:2023", cwe="CWE-319")]
+        return []
+
+    def _check_authentication(self, request):
+        """Missing authentication check"""
+        headers = self._headers(request)
+        if not any(headers.get(x) for x in ["authorization", "x-api-key", "cookie"]):
+            return [_finding("No Authentication", "No auth mechanism found", "CRITICAL", "Authentication", owasp="API2:2023", cwe="CWE-306")]
+        return []
+
+    def _check_bearer_token(self, request):
+        """Bearer token basic validation"""
+        auth = self._headers(request).get("authorization", "")
+        if not auth.lower().startswith("bearer "): 
+            return []
+        token = auth[7:].strip()
+        findings = [_finding("Bearer Token Used", "Bearer authentication detected", "LOW", "Authentication")]
+        if len(token) < 20:
+            findings.append(_finding("Weak Bearer Token", "Token too short", "HIGH", "Authentication"))
+        return findings
+
+    def _check_jwt_detailed(self, request):
+        """Deep JWT analysis with expiry and claims"""
+        auth = self._headers(request).get("authorization", "")
+        if not auth.lower().startswith("bearer "): 
+            return []
+        token = auth[7:].strip()
+        if len(token.split(".")) != 3:
+            return [_finding("Malformed JWT", "Invalid JWT format", "HIGH", "JWT Security")]
+
+        findings = []
+        try:
+            header = jwt.get_unverified_header(token)
+            payload = jwt.decode(token, options={"verify_signature": False})
+
+            alg = str(header.get("alg", "")).upper()
+            if alg == "NONE":
+                findings.append(_finding("JWT alg=none", "Unsigned JWT - Critical vulnerability", "CRITICAL", "JWT Security", owasp="API2:2023", cwe="CWE-347"))
+            elif alg not in _ACCEPTABLE_ALGS:
+                findings.append(_finding(f"Weak JWT Algorithm: {alg}", "", "HIGH", "JWT Security"))
+
+            # Expiry check
+            exp = payload.get("exp")
+            if exp:
+                if datetime.fromtimestamp(exp, tz=timezone.utc) < datetime.now(timezone.utc) - timedelta(minutes=5):
+                    findings.append(_finding("JWT Expired", "", "HIGH", "JWT Security", cwe="CWE-613"))
+            else:
+                findings.append(_finding("JWT Missing exp claim", "Token never expires", "MEDIUM", "JWT Security", cwe="CWE-613"))
+
+            if not payload.get("aud"):
+                findings.append(_finding("JWT Missing aud claim", "Weak audience validation", "MEDIUM", "JWT Security"))
         except Exception as e:
-
-            findings.append({
-                "issue": "Invalid JWT Token",
-                "description": f"JWT parsing failed: {str(e)}",
-                "severity": "HIGH",
-                "category": "JWT Security"
-            })
-
+            findings.append(_finding("JWT Parse Error", str(e)[:100], "MEDIUM", "JWT Security"))
         return findings
 
-    # ======================================================
-    # TRANSPORT SECURITY
-    # ======================================================
-    def _transport_security_analysis(self, request: Dict) -> List[Dict]:
-
-        url = str(request.get("url", "")).strip().lower()
-
-        if url.startswith("http://"):
-
-            return [{
-                "issue": "Insecure HTTP Transport",
-                "description": "Data transmitted over unencrypted HTTP.",
-                "severity": "CRITICAL",
-                "category": "Transport Security",
-                "recommendation": "Use HTTPS with TLS 1.2+."
-            }]
-
+    def _check_plaintext_credentials(self, request, response):
+        """Plain text password/secret detection in body"""
+        text = self._body_text(request) + " " + self._body_text(response)
+        if re.search(r'"password"\s*:\s*"[^"]{6,}"', text, re.I) or re.search(r'"secret"\s*:\s*"[^"]{8,}"', text, re.I):
+            return [_finding("Plaintext Credential in Body", "Sensitive data exposed in plain text", "CRITICAL", "Data Protection", owasp="API3:2023", cwe="CWE-312")]
         return []
 
-    # ======================================================
-    # SECURITY HEADERS
-    # ======================================================
-    def _security_headers_analysis(self, response: Dict) -> List[Dict]:
+    def _check_token_exposure(self, request, response):
+        """Signature-based secret detection"""
+        text = self._body_text(request) + " " + self._body_text(response)
+        if re.search(r"sk_live_|ghp_|AKIA[0-9A-Z]{16}|ey[A-Za-z0-9_-]{30,}", text):
+            return [_finding("Hardcoded Secret/Token", "API key or token exposed in payload", "CRITICAL", "Secret Exposure", cwe="CWE-312")]
+        return []
 
-        headers = self._normalize_headers(response.get("headers", {}))
-
-        required = [
-            "content-security-policy",
-            "strict-transport-security",
-            "x-content-type-options",
-            "x-frame-options",
-            "referrer-policy"
-        ]
-
-        missing = [h for h in required if h not in headers]
-
+    def _check_security_headers(self, response, is_test_host):
+        """Security headers check"""
+        if is_test_host or not response: 
+            return []
+        h = self._headers(response)
+        missing = [x for x in ["strict-transport-security", "x-content-type-options"] if x not in h]
         if missing:
-
-            return [{
-                "issue": "Missing Security Headers",
-                "description": f"Missing headers: {', '.join(missing)}",
-                "severity": "MEDIUM",
-                "category": "Security Headers",
-                "recommendation": "Add recommended security headers."
-            }]
-
+            return [_finding("Missing Security Headers", f"Missing: {missing}", "MEDIUM", "Security Headers", owasp="API8:2023")]
         return []
 
-    # ======================================================
-    # PLAINTEXT SENSITIVE DATA
-    # ======================================================
-    def _plaintext_analysis(self, request: Dict, response: Dict) -> List[Dict]:
-
-        findings = []
-
-        payloads = [
-            ("Request", request.get("body")),
-            ("Response", response.get("body"))
-        ]
-
-        patterns = [
-            r'password"\s*:\s*"[^"]+"',
-            r'secret"\s*:\s*"[^"]+"',
-            r'api[_-]?key"\s*:\s*"[^"]+"'
-        ]
-
-        for location, body in payloads:
-
-            if not body:
-                continue
-
-            try:
-
-                text = (
-                    json.dumps(body)
-                    if isinstance(body, (dict, list))
-                    else str(body)
-                )
-
-                for pattern in patterns:
-
-                    if re.search(pattern, text, re.IGNORECASE):
-
-                        findings.append({
-                            "issue": "Sensitive Data Sent in Plaintext",
-                            "description": f"{location} contains sensitive plaintext secrets.",
-                            "severity": "CRITICAL",
-                            "category": "Data Protection",
-                            "recommendation": "Encrypt or mask sensitive data."
-                        })
-
-                        break
-
-            except Exception:
-                pass
-
-        return findings
-
-    # ======================================================
-    # PII ANALYSIS
-    # ======================================================
-    def _sensitive_data_analysis(self, request: Dict, response: Dict) -> List[Dict]:
-
-        findings = []
-
-        for location, body in [
-            ("Request", request.get("body")),
-            ("Response", response.get("body"))
-        ]:
-
-            if not body:
-                continue
-
-            try:
-
-                text = (
-                    json.dumps(body)
-                    if isinstance(body, (dict, list))
-                    else str(body)
-                )
-
-                results = analyzer_engine.analyze(
-                    text=text,
-                    language="en"
-                )
-
-                for result in results:
-
-                    if result.score > 0.65:
-
-                        findings.append({
-                            "issue": f"Sensitive Data Exposure ({result.entity_type})",
-                            "description": f"Detected {result.entity_type} in {location}.",
-                            "severity": "HIGH",
-                            "category": "PII Exposure",
-                            "recommendation": "Mask or encrypt sensitive information."
-                        })
-
-                        break
-
-            except Exception:
-                pass
-
-        return findings
-
-    # ======================================================
-    # GRAPHQL
-    # ======================================================
-    def _graphql_analysis(self, request: Dict) -> List[Dict]:
-
-        body_type = str(request.get("bodyType", "")).lower()
-
-        headers = self._normalize_headers(request.get("headers", {}))
-
-        content_type = headers.get("content-type", "").lower()
-
-        if (
-            body_type == "graphql"
-            or "graphql" in content_type
-        ):
-
-            return [{
-                "issue": "GraphQL Endpoint Detected",
-                "description": "GraphQL endpoints may expose introspection risks.",
-                "severity": "MEDIUM",
-                "category": "GraphQL Security",
-                "recommendation": "Disable GraphQL introspection in production."
-            }]
-
+    def _check_pii(self, request, response):
+        if not _presidio: 
+            return []
         return []
 
-    # ======================================================
-    # RATE LIMIT
-    # ======================================================
-    def _rate_limit_analysis(self, response: Dict) -> List[Dict]:
-
-        headers = self._normalize_headers(response.get("headers", {}))
-
-        if not any(
-            h in headers
-            for h in [
-                "x-ratelimit-limit",
-                "ratelimit-limit"
-            ]
-        ):
-
-            return [{
-                "issue": "Missing Rate Limiting",
-                "description": "No rate limiting headers detected.",
-                "severity": "HIGH",
-                "category": "Availability",
-                "recommendation": "Implement API rate limiting."
-            }]
-
+    def _check_rate_limiting(self, response, is_test_host):
+        """Rate limiting headers"""
+        if is_test_host or not response: 
+            return []
+        if not any("ratelimit" in k or "retry-after" in k for k in self._headers(response)):
+            return [_finding("No Rate Limiting", "No rate limit headers detected", "MEDIUM", "Availability", owasp="API4:2023")]
         return []
 
-    # ======================================================
-    # SERVER LEAK
-    # ======================================================
-    def _server_leak_analysis(self, response: Dict) -> List[Dict]:
-
-        headers = self._normalize_headers(response.get("headers", {}))
-
-        if "server" in headers:
-
-            return [{
-                "issue": "Server Information Disclosure",
-                "description": f"Server header exposed: {headers['server']}",
-                "severity": "MEDIUM",
-                "category": "Information Disclosure",
-                "recommendation": "Hide or minimize server banners."
-            }]
-
+    def _check_injection(self, request):
+        """Injection pattern detection"""
+        text = self._body_text(request)
+        if re.search(r"(\.\./|union\s+select|xp_cmdshell|;|\bor\b\s+1=1)", text, re.I):
+            return [_finding("Injection Pattern Detected", "Possible SQL/Command injection", "CRITICAL", "Injection", owasp="API1:2023", cwe="CWE-89")]
         return []
 
-    # ======================================================
-    # ERROR ANALYSIS
-    # ======================================================
-    def _error_analysis(self, response: Dict) -> List[Dict]:
-
-        status = response.get("status")
-
-        if status in [500, 502, 503]:
-
-            return [{
-                "issue": "Server Error Response",
-                "description": "Server returned internal error.",
-                "severity": "HIGH",
-                "category": "Error Handling",
-                "recommendation": "Avoid exposing internal server errors."
-            }]
-
+    def _check_sensitive_paths(self, request):
+        """Sensitive URL paths"""
+        if re.search(r"/(\.env|admin|debug|config|swagger|actuator)", str(request.get("url", "")), re.I):
+            return [_finding("Sensitive Path Exposure", "Admin/debug/config endpoint", "HIGH", "Endpoint Exposure", owasp="API8:2023")]
         return []
 
-    # ======================================================
-    # INJECTION ANALYSIS
-    # ======================================================
-    def _injection_analysis(self, request: Dict) -> List[Dict]:
-
-        body = str(request.get("body", "")).lower()
-
-        patterns = [
-            "union select",
-            "' or 1=1",
-            "<script>",
-            "javascript:",
-            "drop table",
-            "../../",
-            "xp_cmdshell"
-        ]
-
-        if any(x in body for x in patterns):
-
-            return [{
-                "issue": "Potential Injection Attempt",
-                "description": "Suspicious injection payload detected.",
-                "severity": "CRITICAL",
-                "category": "Injection Attack",
-                "recommendation": "Sanitize and validate all user inputs."
-            }]
-
-        return []
-
-    # ======================================================
-    # AI PROMPT INJECTION
-    # ======================================================
-    def _ai_prompt_injection_analysis(self, request: Dict) -> List[Dict]:
-
-        body = str(request.get("body", "")).lower()
-
-        prompts = [
-            "ignore previous instructions",
-            "bypass safety",
-            "reveal system prompt"
-        ]
-
-        if any(p in body for p in prompts):
-
-            return [{
-                "issue": "AI Prompt Injection Attempt",
-                "description": "Potential AI prompt injection detected.",
-                "severity": "HIGH",
-                "category": "AI Security",
-                "recommendation": "Sanitize prompts and isolate model instructions."
-            }]
-
-        return []
-
-    # ======================================================
-    # FILE UPLOAD
-    # ======================================================
-    def _file_upload_analysis(self, request: Dict) -> List[Dict]:
-
-        headers = self._normalize_headers(request.get("headers", {}))
-
-        content_type = headers.get("content-type", "").lower()
-
-        if "multipart/form-data" in content_type:
-
-            return [{
-                "issue": "File Upload Endpoint Detected",
-                "description": "File upload detected. Ensure strict validation.",
-                "severity": "HIGH",
-                "category": "File Upload Security",
-                "recommendation": "Validate file types, size, and scan uploads."
-            }]
-
-        return []
-
-    # ======================================================
-    # CORS
-    # ======================================================
-    def _cors_analysis(self, response: Dict) -> List[Dict]:
-
-        headers = self._normalize_headers(response.get("headers", {}))
-
-        origin = headers.get("access-control-allow-origin")
-
-        if origin == "*":
-
-            return [{
-                "issue": "Permissive CORS Policy",
-                "description": "Wildcard CORS policy detected.",
-                "severity": "HIGH",
-                "category": "CORS Security",
-                "recommendation": "Restrict CORS to trusted domains."
-            }]
-
-        return []
-
-    # ======================================================
-    # COOKIE ANALYSIS
-    # ======================================================
-    def _cookie_analysis(self, response: Dict) -> List[Dict]:
-
-        findings = []
-
-        headers = self._normalize_headers(response.get("headers", {}))
-
-        cookie = headers.get("set-cookie", "").lower()
-
-        if not cookie:
-            return findings
-
-        if "httponly" not in cookie:
-
-            findings.append({
-                "issue": "Cookie Missing HttpOnly",
-                "description": "Cookie accessible via JavaScript.",
-                "severity": "HIGH",
-                "category": "Cookie Security",
-                "recommendation": "Add HttpOnly flag."
-            })
-
-        if "secure" not in cookie:
-
-            findings.append({
-                "issue": "Cookie Missing Secure Flag",
-                "description": "Cookie may be transmitted over HTTP.",
-                "severity": "HIGH",
-                "category": "Cookie Security",
-                "recommendation": "Add Secure flag."
-            })
-
-        return findings
-
-    # ======================================================
-    # HTTP METHODS
-    # ======================================================
-    def _http_method_analysis(self, request: Dict) -> List[Dict]:
-
-        method = str(request.get("method", "")).upper()
-
-        if method in ["TRACE", "CONNECT"]:
-
-            return [{
-                "issue": f"Dangerous HTTP Method ({method})",
-                "description": f"Use of dangerous HTTP method: {method}",
-                "severity": "HIGH",
-                "category": "HTTP Security",
-                "recommendation": "Disable dangerous HTTP methods."
-            }]
-
-        return []
-
-    # ======================================================
-    # CONTENT TYPE
-    # ======================================================
-    def _content_type_analysis(self, request: Dict) -> List[Dict]:
-
-        headers = self._normalize_headers(request.get("headers", {}))
-
-        content_type = headers.get("content-type", "").lower()
-
-        if "text/plain" in content_type:
-
-            return [{
-                "issue": "Plaintext Content-Type",
-                "description": "Using plaintext content-type.",
-                "severity": "MEDIUM",
-                "category": "Transport Security",
-                "recommendation": "Use secure structured content-types."
-            }]
-
-        return []
-
-    # ======================================================
-    # PATH ANALYSIS
-    # ======================================================
-    def _path_analysis(self, request: Dict) -> List[Dict]:
-
-        url = str(request.get("url", "")).lower()
-
-        sensitive_paths = [
-            "/admin",
-            "/debug",
-            "/config",
-            "/actuator",
-            "/swagger",
-            "/internal"
-        ]
-
-        for path in sensitive_paths:
-
-            if path in url:
-
-                return [{
-                    "issue": "Sensitive Endpoint Detected",
-                    "description": f"Sensitive path detected: {path}",
-                    "severity": "HIGH",
-                    "category": "Endpoint Exposure",
-                    "recommendation": "Protect sensitive endpoints with authentication."
-                }]
-
-        return []
-
-    # ======================================================
-    # SUSPICIOUS PAYLOADS
-    # ======================================================
-    def _suspicious_pattern_analysis(self, request: Dict) -> List[Dict]:
-
-        body = str(request.get("body", "")).lower()
-
-        patterns = [
-            "nc -e",
-            "/etc/passwd",
-            "powershell",
-            "cmd.exe",
-            "bash -i",
-            "whoami"
-        ]
-
-        if any(p in body for p in patterns):
-
-            return [{
-                "issue": "Suspicious Payload Detected",
-                "description": "Potential malicious payload detected.",
-                "severity": "CRITICAL",
-                "category": "Malicious Payload",
-                "recommendation": "Block malicious command patterns."
-            }]
-
-        return []
-
-    # ======================================================
-    # TOKEN EXPOSURE
-    # ======================================================
-    def _token_exposure_analysis(
-        self,
-        request: Dict,
-        response: Dict
-    ) -> List[Dict]:
-
-        text = (
-            str(request.get("body", ""))
-            + str(response.get("body", ""))
-        )
-
-        patterns = [
-            r"sk_live_[A-Za-z0-9]+",
-            r"ghp_[A-Za-z0-9]+",
-            r"AIza[0-9A-Za-z-_]+"
-        ]
-
-        for pattern in patterns:
-
-            if re.search(pattern, text):
-
-                return [{
-                    "issue": "Exposed API Secret",
-                    "description": "Potential secret key exposure detected.",
-                    "severity": "CRITICAL",
-                    "category": "Secret Exposure",
-                    "recommendation": "Remove exposed secrets immediately."
-                }]
-
+    def _check_suspicious_payloads(self, request):
+        """RCE / malicious payload detection"""
+        if re.search(r"(cmd\.exe|powershell|whoami|nc\s+-e)", self._body_text(request), re.I):
+            return [_finding("Suspicious/RCE Payload", "Potential command injection", "CRITICAL", "Malicious Payload")]
         return []
 
 
-# ==========================================================
-# INSTANCE
-# ==========================================================
+# Singleton Instance
 analyzer = TrustEdgeAnalyzer()

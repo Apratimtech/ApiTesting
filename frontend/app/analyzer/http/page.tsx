@@ -13,18 +13,17 @@ export default function HttpScreen() {
   const [url, setUrl] = useState("https://jsonplaceholder.typicode.com/posts");
   const [headers, setHeaders] = useState([{ key: "Content-Type", value: "application/json" }]);
   const [body, setBody] = useState('{\n  "title": "Trust_Edge Test",\n  "body": "Hello from Trust_Edge!"\n}');
-  
+
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<any>(null);
   const [status, setStatus] = useState<number | null>(null);
   const [responseTime, setResponseTime] = useState<number | null>(null);
 
   const [logs, setLogs] = useState<string[]>([
-    "🚀 HTTP Client Initialized",
+    "⚡ HTTP Client Initialized",
     "Ready to send requests..."
   ]);
 
-  // Load saved request from sidebar
   useEffect(() => {
     const saved = localStorage.getItem("last_selected_request");
     if (saved) {
@@ -48,9 +47,7 @@ export default function HttpScreen() {
     setLogs(prev => [`${new Date().toLocaleTimeString()} ${text}`, ...prev].slice(0, 50));
   };
 
-  const addHeader = () => {
-    setHeaders([...headers, { key: "", value: "" }]);
-  };
+  const addHeader = () => setHeaders([...headers, { key: "", value: "" }]);
 
   const updateHeader = (index: number, field: "key" | "value", value: string) => {
     const newHeaders = [...headers];
@@ -73,24 +70,33 @@ export default function HttpScreen() {
     setStatus(null);
     setResponseTime(null);
 
-    addLog(`📤 Sending ${method} → ${url}`);
+    addLog(`🚀 Sending ${method} → ${url}`);
 
     try {
       const start = Date.now();
 
+      // Build headers from user input
+      const headerObj: Record<string, string> = headers.reduce((acc, h) => {
+        if (h.key.trim()) acc[h.key.trim()] = h.value;
+        return acc;
+      }, {} as Record<string, string>);
+
       const options: RequestInit = {
         method,
-        headers: headers.reduce((acc, h) => {
-          if (h.key.trim()) acc[h.key.trim()] = h.value;
-          return acc;
-        }, {} as Record<string, string>),
+        // Route through /api/proxy to fix CORS on external APIs
+        // x-proxy-url tells the proxy where to forward the request
+        headers: {
+          ...headerObj,
+          "x-proxy-url": url,
+        },
       };
 
       if (["POST", "PUT", "PATCH"].includes(method) && body) {
         options.body = body;
       }
 
-      const res = await fetch(url, options);
+      // Call /api/proxy instead of the external URL directly
+      const res = await fetch("/api/proxy", options);
       const duration = Date.now() - start;
 
       let data;
@@ -123,7 +129,6 @@ export default function HttpScreen() {
       body: ["POST", "PUT", "PATCH"].includes(method) ? body : undefined,
       headers,
     };
-
     localStorage.setItem("last_selected_request", JSON.stringify(reqData));
     alert("✅ HTTP Request Saved!");
   };
@@ -146,7 +151,7 @@ export default function HttpScreen() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* Left Panel - Request Settings */}
+          {/* Left Panel */}
           <div className="lg:col-span-5 space-y-6">
             <Card className="bg-slate-950 border-slate-700">
               <CardHeader>
@@ -181,9 +186,7 @@ export default function HttpScreen() {
                 <div>
                   <div className="flex justify-between mb-3">
                     <label className="text-sm text-slate-400">Headers</label>
-                    <Button onClick={addHeader} variant="outline" size="sm">
-                      + Add
-                    </Button>
+                    <Button onClick={addHeader} variant="outline" size="sm">+ Add</Button>
                   </div>
                   {headers.map((header, index) => (
                     <div key={index} className="flex gap-2 mb-2">
@@ -199,11 +202,7 @@ export default function HttpScreen() {
                         onChange={(e) => updateHeader(index, "value", e.target.value)}
                         className="bg-slate-900 border-slate-700"
                       />
-                      <Button
-                        variant="destructive"
-                        size="icon"
-                        onClick={() => removeHeader(index)}
-                      >
+                      <Button variant="destructive" size="icon" onClick={() => removeHeader(index)}>
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </div>
@@ -221,7 +220,7 @@ export default function HttpScreen() {
             </Card>
           </div>
 
-          {/* Right Panel - Body & Send */}
+          {/* Right Panel */}
           <div className="lg:col-span-7">
             <Card className="bg-slate-950 border-slate-700 h-full">
               <CardHeader>
@@ -254,32 +253,24 @@ export default function HttpScreen() {
 
         {/* Response + Logs */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
-          {/* Response */}
           <Card className="bg-slate-950 border-slate-700">
-            <CardHeader>
-              <CardTitle>Response</CardTitle>
-            </CardHeader>
+            <CardHeader><CardTitle>Response</CardTitle></CardHeader>
             <CardContent>
               {status && (
                 <div className={`inline-flex items-center px-4 py-1.5 rounded-lg text-sm mb-4 ${
-                  status < 300 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                  status < 300 ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"
                 }`}>
-                  Status: {status} • {responseTime}ms
+                  Status: {status} — {responseTime}ms
                 </div>
               )}
               <pre className="bg-black/80 border border-slate-800 p-6 h-[420px] overflow-auto font-mono text-sm rounded-xl text-slate-300">
-                {response 
-                  ? JSON.stringify(response, null, 2) 
-                  : "Send a request to see response here..."}
+                {response ? JSON.stringify(response, null, 2) : "Send a request to see response here..."}
               </pre>
             </CardContent>
           </Card>
 
-          {/* Logs */}
           <Card className="bg-slate-950 border-slate-700">
-            <CardHeader>
-              <CardTitle>Console Logs</CardTitle>
-            </CardHeader>
+            <CardHeader><CardTitle>Console Logs</CardTitle></CardHeader>
             <CardContent>
               <pre className="bg-black/80 border border-slate-800 p-6 h-[420px] overflow-auto font-mono text-sm text-emerald-400 rounded-xl">
                 {logs.map((log, i) => (

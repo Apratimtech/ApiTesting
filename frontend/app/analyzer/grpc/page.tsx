@@ -6,6 +6,8 @@ import {
   Trash2,
   Plus,
   Wand2,
+  Radio,
+  AlertTriangle,
 } from "lucide-react";
 
 type MetadataItem = {
@@ -24,70 +26,68 @@ type Vulnerability = {
 export default function GrpcPage() {
   const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const [connected, setConnected] = useState(true);
+  const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [scanning, setScanning] = useState(false);
+
   const [streaming, setStreaming] = useState(false);
   const [useTls, setUseTls] = useState(true);
 
-  const [activeTab, setActiveTab] =
-    useState("Security Scan");
+  const [activeTab, setActiveTab] = useState<
+    "Response" | "Metadata" | "Timing" | "Security Scan"
+  >("Security Scan");
 
-  const [latency, setLatency] = useState(42);
-
+  const [latency, setLatency] = useState(0);
   const [riskScore, setRiskScore] = useState(0);
 
-  const [riskLevel, setRiskLevel] =
-    useState("LOW");
+  const [riskLevel, setRiskLevel] = useState<
+    "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+  >("LOW");
 
-  const [invoking, setInvoking] =
-    useState(false);
-
+  const [invoking, setInvoking] = useState(false);
   const [error, setError] = useState("");
 
-  const [serverUrl, setServerUrl] =
-    useState(
-      "https://api.test.com/login"
-    );
+  const [serverUrl, setServerUrl] = useState(
+    "grpc://localhost:50051"
+  );
 
-  const [serviceName, setServiceName] =
-    useState("AnalyzerService");
+  const [serviceName, setServiceName] = useState(
+    "AnalyzerService"
+  );
 
-  const [methodName, setMethodName] =
-    useState("Analyze");
+  const [methodName, setMethodName] = useState(
+    "Analyze"
+  );
 
   const [payload, setPayload] = useState(
     JSON.stringify(
       {
         username: "admin",
         password: "' OR 1=1 --",
-        token:
-          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        token: "jwt_token_here",
       },
       null,
       2
     )
   );
 
-  const [metadata, setMetadata] =
-    useState<MetadataItem[]>([
-      {
-        key: "authorization",
-        value:
-          "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-      },
-      {
-        key: "x-client-id",
-        value: "grpc-console",
-      },
-    ]);
+  const [metadata, setMetadata] = useState<
+    MetadataItem[]
+  >([
+    {
+      key: "authorization",
+      value: "Bearer jwt_token_here",
+    },
+    {
+      key: "x-client-id",
+      value: "grpc-console",
+    },
+  ]);
 
   const [responseBody, setResponseBody] =
     useState(
       "// Execute request to see response"
     );
-
-  const [headersResponse, setHeadersResponse] =
-    useState<any>({});
 
   const [timingResponse, setTimingResponse] =
     useState<any>({});
@@ -101,9 +101,7 @@ export default function GrpcPage() {
   useEffect(() => {
     return () => {
       if (connectTimeoutRef.current) {
-        clearTimeout(
-          connectTimeoutRef.current
-        );
+        clearTimeout(connectTimeoutRef.current);
       }
     };
   }, []);
@@ -139,9 +137,7 @@ export default function GrpcPage() {
     ]);
   };
 
-  const removeMetadata = (
-    index: number
-  ) => {
+  const removeMetadata = (index: number) => {
     setMetadata((prev) =>
       prev.filter((_, i) => i !== index)
     );
@@ -157,7 +153,7 @@ export default function GrpcPage() {
         i === index
           ? {
               ...item,
-              [field]: value.slice(0, 300),
+              [field]: value,
             }
           : item
       )
@@ -176,38 +172,27 @@ export default function GrpcPage() {
 
     setConnecting(true);
 
-    setConnected(false);
-
     connectTimeoutRef.current =
       setTimeout(() => {
         setConnecting(false);
         setConnected(true);
-      }, 1000);
+      }, 800);
   };
 
   const invoke = async () => {
     if (invoking) return;
 
     setError("");
-
-    const parsedPayload =
-      validatePayload();
-
-    if (!parsedPayload) return;
-
-    if (
-      !serviceName.trim() ||
-      !methodName.trim()
-    ) {
-      setError(
-        "Service and method are required"
-      );
-      return;
-    }
-
+    setScanning(true);
     setInvoking(true);
 
-    setActiveTab("Response");
+    const parsedPayload = validatePayload();
+
+    if (!parsedPayload) {
+      setInvoking(false);
+      setScanning(false);
+      return;
+    }
 
     try {
       const headersObject: Record<
@@ -224,17 +209,20 @@ export default function GrpcPage() {
 
       const requestBody = {
         request: {
+          protocol: "grpc",
           target: serverUrl,
-          method: `${serviceName}/${methodName}`,
+          service: serviceName,
+          method: methodName,
           headers: headersObject,
           body: parsedPayload,
+          streaming,
+          tls: useTls,
         },
-        response: {},
       };
 
       const start = performance.now();
 
-      const res = await fetch(
+      const response = await fetch(
         "http://127.0.0.1:8000/api/v1/analyze",
         {
           method: "POST",
@@ -242,18 +230,27 @@ export default function GrpcPage() {
             "Content-Type":
               "application/json",
           },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify(
+            requestBody
+          ),
         }
       );
 
-      const data = await res.json();
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
 
       const end = performance.now();
 
-      const execution =
-        Math.floor(end - start);
+      const executionTime = Math.floor(
+        end - start
+      );
 
-      setLatency(execution);
+      setLatency(executionTime);
 
       setRiskScore(
         data.overall_risk_score || 0
@@ -267,59 +264,41 @@ export default function GrpcPage() {
         data.findings || []
       );
 
-      setHeadersResponse({
-        "content-type":
-          "application/json",
-        "strict-transport-security":
-          "enabled",
-        "x-content-type-options":
-          "nosniff",
-        "x-frame-options": "DENY",
-      });
+      // ONLY CLEAN RESPONSE TAB
+      const cleanResponse = {
+        success: data.success,
+        timestamp: data.timestamp,
+        severity: data.severity,
+        summary: data.summary,
+      };
 
-      setTimingResponse({
-        latency: `${execution}ms`,
-        analyzed_at:
-          data.timestamp,
-        backend:
-          "Trust_Edge Analyzer",
-      });
+      setResponseBody(
+        JSON.stringify(
+          cleanResponse,
+          null,
+          2
+        )
+      );
 
+      // REAL METADATA TAB
       setMetadataResponse({
         grpc: true,
         tls_enabled: useTls,
         streaming,
         service: serviceName,
         method: methodName,
+        endpoint: serverUrl,
       });
 
-      setResponseBody(
-        JSON.stringify(
-          {
-            status: "SUCCESS",
-            message:
-              "Request analyzed successfully",
-            request: {
-              target: serverUrl,
-              method: `${serviceName}/${methodName}`,
-              body: parsedPayload,
-            },
-            response: {
-              status_code: 200,
-              message:
-                "gRPC security analysis completed",
-            },
-            server_metadata: {
-              processed_by:
-                "Trust_Edge",
-              execution_time: `${execution}ms`,
-              tls_enabled: useTls,
-              streaming,
-            },
-          },
-          null,
-          2
-        )
+      // REAL TIMING TAB
+      setTimingResponse({
+        latency: `${executionTime}ms`,
+        analyzed_at:
+          data.timestamp,
+      });
+
+      setActiveTab(
+        "Security Scan"
       );
     } catch (err) {
       console.error(err);
@@ -327,14 +306,20 @@ export default function GrpcPage() {
       setError(
         "Failed to connect backend analyzer"
       );
+
+      setResponseBody(
+        "// Backend connection failed"
+      );
     } finally {
       setInvoking(false);
+      setScanning(false);
     }
   };
 
   return (
     <main className="min-h-screen bg-[#0c1324] text-[#dce1fb] p-8">
       <div className="max-w-[1440px] mx-auto flex flex-col gap-6">
+        {/* HEADER */}
         <div className="flex items-end justify-between">
           <div>
             <h1 className="text-5xl font-extrabold tracking-tight bg-gradient-to-r from-purple-300 to-cyan-300 bg-clip-text text-transparent drop-shadow-[0_0_15px_rgba(221,183,255,0.4)]">
@@ -343,7 +328,8 @@ export default function GrpcPage() {
 
             <p className="text-cyan-300 text-xs uppercase tracking-[0.3em] mt-3 flex items-center gap-2">
               <Shield className="w-4 h-4" />
-              Enterprise RPC Security Testing
+              Enterprise RPC Security
+              Testing
             </p>
           </div>
 
@@ -374,13 +360,16 @@ export default function GrpcPage() {
           </div>
         </div>
 
+        {/* ERROR */}
         {error && (
-          <div className="border border-red-400/20 bg-red-400/10 text-red-300 px-4 py-3 rounded-2xl text-sm">
+          <div className="border border-red-400/20 bg-red-400/10 text-red-300 px-4 py-3 rounded-2xl text-sm flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4" />
             {error}
           </div>
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* LEFT PANEL */}
           <section className="lg:col-span-5 rounded-2xl border border-white/10 bg-[#151b2d]/70 backdrop-blur-xl p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-bold text-cyan-300">
@@ -409,6 +398,7 @@ export default function GrpcPage() {
             </div>
 
             <div className="space-y-5">
+              {/* SERVER URL */}
               <div>
                 <label className="text-xs uppercase text-gray-400 block mb-2">
                   Server URL
@@ -425,6 +415,7 @@ export default function GrpcPage() {
                 />
               </div>
 
+              {/* SERVICE + METHOD */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs uppercase text-gray-400 block mb-2">
@@ -459,35 +450,73 @@ export default function GrpcPage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Shield className="w-5 h-5 text-cyan-300" />
+              {/* TLS */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Shield className="w-5 h-5 text-cyan-300" />
 
-                  <span>
-                    TLS Encryption
-                  </span>
+                    <span>
+                      TLS Encryption
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={() =>
+                      setUseTls(
+                        !useTls
+                      )
+                    }
+                    className={`w-12 h-6 rounded-full transition-all ${
+                      useTls
+                        ? "bg-cyan-400"
+                        : "bg-gray-600"
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 bg-white rounded-full transition-all ${
+                        useTls
+                          ? "translate-x-7"
+                          : "translate-x-1"
+                      }`}
+                    />
+                  </button>
                 </div>
 
-                <button
-                  onClick={() =>
-                    setUseTls(!useTls)
-                  }
-                  className={`w-12 h-6 rounded-full transition-all ${
-                    useTls
-                      ? "bg-cyan-400"
-                      : "bg-gray-600"
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 bg-white rounded-full transition-all ${
-                      useTls
-                        ? "translate-x-7"
-                        : "translate-x-1"
+                {/* STREAMING */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Radio className="w-5 h-5 text-purple-300" />
+
+                    <span>
+                      Streaming Mode
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={() =>
+                      setStreaming(
+                        !streaming
+                      )
+                    }
+                    className={`w-12 h-6 rounded-full transition-all ${
+                      streaming
+                        ? "bg-purple-500"
+                        : "bg-gray-600"
                     }`}
-                  />
-                </button>
+                  >
+                    <div
+                      className={`w-4 h-4 bg-white rounded-full transition-all ${
+                        streaming
+                          ? "translate-x-7"
+                          : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
 
+              {/* METADATA */}
               <div className="bg-black/20 rounded-2xl p-4 border border-white/5">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-sm uppercase text-gray-400">
@@ -495,7 +524,9 @@ export default function GrpcPage() {
                   </h3>
 
                   <button
-                    onClick={addMetadata}
+                    onClick={
+                      addMetadata
+                    }
                     className="text-cyan-300"
                   >
                     <Plus className="w-4 h-4" />
@@ -504,18 +535,26 @@ export default function GrpcPage() {
 
                 <div className="space-y-3">
                   {metadata.map(
-                    (item, index) => (
+                    (
+                      item,
+                      index
+                    ) => (
                       <div
                         key={index}
                         className="flex gap-2"
                       >
                         <input
-                          value={item.key}
-                          onChange={(e) =>
+                          value={
+                            item.key
+                          }
+                          onChange={(
+                            e
+                          ) =>
                             updateMetadata(
                               index,
                               "key",
-                              e.target.value
+                              e.target
+                                .value
                             )
                           }
                           placeholder="Key"
@@ -523,12 +562,17 @@ export default function GrpcPage() {
                         />
 
                         <input
-                          value={item.value}
-                          onChange={(e) =>
+                          value={
+                            item.value
+                          }
+                          onChange={(
+                            e
+                          ) =>
                             updateMetadata(
                               index,
                               "value",
-                              e.target.value
+                              e.target
+                                .value
                             )
                           }
                           placeholder="Value"
@@ -551,9 +595,12 @@ export default function GrpcPage() {
                 </div>
               </div>
 
+              {/* CONNECT */}
               <button
                 onClick={connect}
-                disabled={connecting}
+                disabled={
+                  connecting
+                }
                 className="w-full py-4 rounded-xl bg-gradient-to-r from-purple-500 to-cyan-500 font-bold"
               >
                 {connecting
@@ -563,10 +610,12 @@ export default function GrpcPage() {
             </div>
           </section>
 
+          {/* REQUEST PANEL */}
           <section className="lg:col-span-7 rounded-2xl border border-cyan-400/20 bg-[#151b2d]/70 backdrop-blur-xl p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-bold text-cyan-300">
-                Request / Invoke Panel
+                Request / Invoke
+                Panel
               </h2>
 
               <button
@@ -594,11 +643,13 @@ export default function GrpcPage() {
             <div className="grid grid-cols-4 gap-4 mt-6">
               <button
                 onClick={invoke}
-                disabled={invoking}
+                disabled={
+                  invoking
+                }
                 className="col-span-3 py-4 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-500 font-bold"
               >
                 {invoking
-                  ? "Executing RPC Call..."
+                  ? "Analyzing Security..."
                   : "Invoke Request"}
               </button>
 
@@ -613,11 +664,11 @@ export default function GrpcPage() {
             </div>
           </section>
 
+          {/* TABS */}
           <section className="lg:col-span-12 rounded-2xl border border-white/10 bg-[#151b2d]/70 overflow-hidden">
             <div className="flex border-b border-white/10 overflow-x-auto">
               {[
                 "Response",
-                "Headers",
                 "Metadata",
                 "Timing",
                 "Security Scan",
@@ -625,10 +676,13 @@ export default function GrpcPage() {
                 <button
                   key={tab}
                   onClick={() =>
-                    setActiveTab(tab)
+                    setActiveTab(
+                      tab as any
+                    )
                   }
-                  className={`px-8 py-4 text-xs uppercase font-bold ${
-                    activeTab === tab
+                  className={`px-8 py-4 text-xs uppercase font-bold whitespace-nowrap ${
+                    activeTab ===
+                    tab
                       ? "text-purple-300 border-b-2 border-purple-300 bg-purple-300/5"
                       : "text-gray-400"
                   }`}
@@ -638,25 +692,18 @@ export default function GrpcPage() {
               ))}
             </div>
 
-            <div className="p-6 min-h-[320px] overflow-auto">
+            <div className="p-6 min-h-[420px] overflow-auto">
+              {/* RESPONSE */}
               {activeTab ===
                 "Response" && (
                 <pre className="font-mono text-sm text-gray-200 whitespace-pre-wrap">
-                  {responseBody}
+                  {
+                    responseBody
+                  }
                 </pre>
               )}
 
-              {activeTab ===
-                "Headers" && (
-                <pre className="font-mono text-sm text-gray-200 whitespace-pre-wrap">
-                  {JSON.stringify(
-                    headersResponse,
-                    null,
-                    2
-                  )}
-                </pre>
-              )}
-
+              {/* METADATA */}
               {activeTab ===
                 "Metadata" && (
                 <pre className="font-mono text-sm text-gray-200 whitespace-pre-wrap">
@@ -668,6 +715,7 @@ export default function GrpcPage() {
                 </pre>
               )}
 
+              {/* TIMING */}
               {activeTab ===
                 "Timing" && (
                 <pre className="font-mono text-sm text-gray-200 whitespace-pre-wrap">
@@ -679,16 +727,20 @@ export default function GrpcPage() {
                 </pre>
               )}
 
+              {/* SECURITY */}
               {activeTab ===
                 "Security Scan" && (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                   <div className="lg:col-span-3 rounded-2xl border border-white/5 bg-black/20 p-6 flex flex-col items-center justify-center">
                     <span className="text-xs uppercase text-gray-400 mb-4">
-                      Overall Risk Score
+                      Overall Risk
+                      Score
                     </span>
 
                     <div className="text-6xl font-extrabold text-purple-300">
-                      {riskScore}
+                      {
+                        riskScore
+                      }
                     </div>
 
                     <div
@@ -705,76 +757,103 @@ export default function GrpcPage() {
                           : "bg-cyan-400/10 text-cyan-300"
                       }`}
                     >
-                      {riskLevel} Risk
+                      {
+                        riskLevel
+                      }{" "}
+                      Risk
                     </div>
                   </div>
 
-                  <div className="lg:col-span-9 grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {vulnerabilities.length ===
-                    0 ? (
-                      <div className="text-gray-400 text-sm">
-                        No vulnerabilities
+                  <div className="lg:col-span-9">
+                    {scanning ? (
+                      <div className="flex flex-col items-center justify-center h-64 text-cyan-300 gap-3">
+                        <div className="animate-pulse text-xl">
+                          🔍
+                          Analyzing
+                          Request...
+                        </div>
+
+                        <p className="text-sm text-gray-400">
+                          Please
+                          wait
+                        </p>
+                      </div>
+                    ) : vulnerabilities.length ===
+                      0 ? (
+                      <div className="text-center py-16 text-gray-400">
+                        No
+                        vulnerabilities
                         detected.
                       </div>
                     ) : (
-                      vulnerabilities.map(
-                        (
-                          vuln,
-                          index
-                        ) => (
-                          <div
-                            key={index}
-                            className="rounded-2xl border border-white/5 bg-black/20 p-5"
-                          >
-                            <div className="flex items-center justify-between mb-4">
-                              <span
-                                className={`text-xs px-3 py-1 rounded-full font-bold ${
-                                  vuln.severity ===
-                                  "CRITICAL"
-                                    ? "bg-red-500/20 text-red-300"
-                                    : vuln.severity ===
-                                      "HIGH"
-                                    ? "bg-orange-500/20 text-orange-300"
-                                    : vuln.severity ===
-                                      "MEDIUM"
-                                    ? "bg-purple-400/10 text-purple-300"
-                                    : "bg-cyan-400/10 text-cyan-300"
-                                }`}
-                              >
-                                {
-                                  vuln.severity
-                                }
-                              </span>
-
-                              <span className="text-xs text-gray-500">
-                                {
-                                  vuln.category
-                                }
-                              </span>
-                            </div>
-
-                            <h3 className="font-bold mb-2">
-                              {vuln.issue}
-                            </h3>
-
-                            <p className="text-sm text-gray-400 leading-relaxed mb-3">
-                              {
-                                vuln.description
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {vulnerabilities.map(
+                          (
+                            vuln,
+                            index
+                          ) => (
+                            <div
+                              key={
+                                index
                               }
-                            </p>
+                              className="rounded-2xl border border-white/5 bg-black/20 p-5"
+                            >
+                              <div className="flex justify-between items-start mb-4">
+                                <span
+                                  className={`text-xs px-3 py-1 rounded-full font-bold ${
+                                    vuln.severity ===
+                                    "CRITICAL"
+                                      ? "bg-red-500/20 text-red-300"
+                                      : vuln.severity ===
+                                        "HIGH"
+                                      ? "bg-orange-500/20 text-orange-300"
+                                      : vuln.severity ===
+                                        "MEDIUM"
+                                      ? "bg-yellow-500/20 text-yellow-300"
+                                      : "bg-blue-500/20 text-blue-300"
+                                  }`}
+                                >
+                                  {
+                                    vuln.severity
+                                  }
+                                </span>
 
-                            {vuln.recommendation && (
-                              <div className="mt-3 text-xs text-cyan-300 border-t border-white/5 pt-3">
-                                Recommendation:
-                                <br />
-                                {
-                                  vuln.recommendation
-                                }
+                                <span className="text-xs text-gray-500">
+                                  {
+                                    vuln.category
+                                  }
+                                </span>
                               </div>
-                            )}
-                          </div>
-                        )
-                      )
+
+                              <h3 className="font-bold mb-2">
+                                {
+                                  vuln.issue
+                                }
+                              </h3>
+
+                              <p className="text-sm text-gray-400 mb-3">
+                                {
+                                  vuln.description
+                                }
+                              </p>
+
+                              {vuln.recommendation && (
+                                <div className="text-xs text-cyan-300 border-t border-white/5 pt-3">
+                                  <strong>
+                                    Recommendation:
+                                  </strong>
+
+                                  <br />
+
+                                  {
+                                    vuln.recommendation
+                                  }
+                                </div>
+                              )}
+                            </div>
+                          )
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

@@ -1,5 +1,6 @@
 "use client";
-import { useState, useEffect } from "react";
+
+import { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -25,7 +26,25 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { saveScan } from "@/lib/history";
+
+// ─────────────────────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────────────────────
+
+type HttpMethod =
+  | "GET"
+  | "POST"
+  | "PUT"
+  | "PATCH"
+  | "DELETE"
+  | "HEAD";
+
+type AuthType =
+  | "no-auth"
+  | "bearer"
+  | "basic"
+  | "api-key"
+  | "jwt";
 
 type BodyType =
   | "none"
@@ -36,6 +55,56 @@ type BodyType =
   | "graphql"
   | "html"
   | "javascript";
+
+interface Header {
+  key: string;
+  value: string;
+}
+
+interface Finding {
+  issue: string;
+  severity:
+    | "CRITICAL"
+    | "HIGH"
+    | "MEDIUM"
+    | "LOW"
+    | "INFO";
+
+  description: string;
+  category?: string;
+}
+
+interface SecurityResult {
+  findings?: Finding[];
+  overall_risk_score?: number;
+}
+
+interface ApiResponse {
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  rawText?: string;
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────────────────────
+
+const BACKEND_URL =
+  "http://localhost:8000/api/v1/analyze";
+
+const NO_BODY_METHODS: HttpMethod[] = [
+  "GET",
+  "HEAD",
+  "DELETE",
+];
+
+const DEFAULT_JSON_BODY = `{
+  "username": "admin",
+  "password": "123456"
+}`;
 
 const severityColors: Record<string, string> = {
   CRITICAL: "bg-red-600 text-white",
@@ -61,212 +130,482 @@ const severityOrder: Record<string, number> = {
   INFO: 1,
 };
 
+// ─────────────────────────────────────────────────────────────
+// COMPONENT
+// ─────────────────────────────────────────────────────────────
+
 export default function Analyzer() {
-  const [method, setMethod] = useState("POST");
-  const [url, setUrl] = useState("https://httpbin.org/anything");
-  const [authType, setAuthType] = useState<
-    "no-auth" | "bearer" | "basic" | "api-key" | "jwt"
-  >("bearer");
-  const [bearer, setBearer] = useState("");
-  const [basicUser, setBasicUser] = useState("");
-  const [basicPass, setBasicPass] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [headers, setHeaders] = useState([
-    { key: "Content-Type", value: "application/json" },
-  ]);
-  const [bodyType, setBodyType] = useState<BodyType>("json");
-  const [body, setBody] = useState(`{
-  "username": "admin",
-  "password": "123456"
-}`);
-  const [graphqlVariables, setGraphqlVariables] = useState(`{
-  "id": 1
-}`);
-  const [apiResponse, setApiResponse] = useState<any>(null);
-  const [securityResult, setSecurityResult] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<"response" | "security">("security");
+  const [method, setMethod] =
+    useState<HttpMethod>("POST");
 
-  // Load last request from localStorage
-  useEffect(() => {
-    const savedReq = localStorage.getItem("last_selected_request");
-    if (savedReq) {
-      try {
-        const req = JSON.parse(savedReq);
-        setMethod(req.method || "POST");
-        setUrl(req.url || "https://httpbin.org/anything");
-        setAuthType(req.authType || "bearer");
-        setBearer(req.bearer || "");
-        setBasicUser(req.basicUser || "");
-        setBasicPass(req.basicPass || "");
-        setApiKey(req.apiKey || "");
-        setHeaders(req.headers || [{ key: "Content-Type", value: "application/json" }]);
-        setBodyType(req.bodyType || "json");
-        setBody(req.body || "");
-      } catch (e) {
-        console.error("Failed to load saved request", e);
-      }
-    }
-  }, []);
+  const [url, setUrl] = useState(
+    "https://httpbin.org/anything"
+  );
+
+  // ─────────────────────────────────────────────────────────
+  // AUTH
+  // ─────────────────────────────────────────────────────────
+
+  const [authType, setAuthType] =
+    useState<AuthType>("bearer");
+
+  const [bearer, setBearer] =
+    useState("");
+
+  const [basicUser, setBasicUser] =
+    useState("");
+
+  const [basicPass, setBasicPass] =
+    useState("");
+
+  const [apiKey, setApiKey] =
+    useState("");
+
+  // ─────────────────────────────────────────────────────────
+  // HEADERS
+  // ─────────────────────────────────────────────────────────
+
+  const [headers, setHeaders] =
+    useState<Header[]>([
+      {
+        key: "Content-Type",
+        value: "application/json",
+      },
+    ]);
+
+  // ─────────────────────────────────────────────────────────
+  // BODY
+  // ─────────────────────────────────────────────────────────
+
+  const [bodyType, setBodyType] =
+    useState<BodyType>("json");
+
+  const [body, setBody] =
+    useState(DEFAULT_JSON_BODY);
+
+  const [graphqlVariables, setGraphqlVariables] =
+    useState(`{\n  "id": 1\n}`);
+
+  // ─────────────────────────────────────────────────────────
+  // RESULTS
+  // ─────────────────────────────────────────────────────────
+
+  const [apiResponse, setApiResponse] =
+    useState<ApiResponse | null>(null);
+
+  const [securityResult, setSecurityResult] =
+    useState<SecurityResult | null>(null);
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [activeTab, setActiveTab] =
+    useState<"response" | "security">(
+      "security"
+    );
+
+  // ─────────────────────────────────────────────────────────
+  // PREVIOUS BODY TYPE
+  // ─────────────────────────────────────────────────────────
+
+  const prevBodyType =
+    useRef<BodyType>(bodyType);
+
+  // ─────────────────────────────────────────────────────────
+  // BODY TYPE DEFAULTS
+  // ─────────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (bodyType === "none") setBody("");
-    if (bodyType === "json") {
-      setBody(`{
-  "username": "admin",
-  "password": "123456"
-}`);
-    }
-    if (bodyType === "html") setBody("<h1>Hello World</h1>");
-    if (bodyType === "javascript") setBody("// JavaScript payload");
-    if (bodyType === "graphql") {
-      setBody(`query User($id: ID!) {
-  user(id: $id) {
-    id
-    name
-  }
-}`);
+    if (prevBodyType.current === bodyType)
+      return;
+
+    prevBodyType.current = bodyType;
+
+    switch (bodyType) {
+      case "none":
+        setBody("");
+        break;
+
+      case "json":
+        setBody(DEFAULT_JSON_BODY);
+        break;
+
+      case "html":
+        setBody("<h1>Hello World</h1>");
+        break;
+
+      case "javascript":
+        setBody("// JavaScript payload");
+        break;
+
+      case "graphql":
+        setBody(
+          `query User($id: ID!) {\n  user(id: $id) {\n    id\n    name\n  }\n}`
+        );
+        break;
+
+      default:
+        setBody("");
     }
   }, [bodyType]);
 
+  // ─────────────────────────────────────────────────────────
+  // HEADER HELPERS
+  // ─────────────────────────────────────────────────────────
+
   const addHeader = () => {
-    setHeaders([...headers, { key: "", value: "" }]);
+    setHeaders((prev) => [
+      ...prev,
+      { key: "", value: "" },
+    ]);
   };
 
   const removeHeader = (index: number) => {
-    setHeaders(headers.filter((_, i) => i !== index));
+    setHeaders((prev) =>
+      prev.filter((_, i) => i !== index)
+    );
   };
 
-  const updateHeader = (index: number, field: "key" | "value", value: string) => {
-    const updated = [...headers];
-    updated[index][field] = value;
-    setHeaders(updated);
+  const updateHeader = (
+    index: number,
+    field: keyof Header,
+    value: string
+  ) => {
+    setHeaders((prev) =>
+      prev.map((h, i) =>
+        i === index
+          ? {
+              ...h,
+              [field]: value,
+            }
+          : h
+      )
+    );
   };
+
+  // ─────────────────────────────────────────────────────────
+  // AUTH → HEADER SYNC
+  // REAL POSTMAN-LIKE BEHAVIOR
+  // ─────────────────────────────────────────────────────────
+
+  const syncedHeaders = useMemo(() => {
+    const cleanHeaders = headers.filter(
+      (h) => h.key.trim() !== ""
+    );
+
+    const filtered = cleanHeaders.filter((h) => {
+      const key = h.key.toLowerCase();
+
+      return ![
+        "authorization",
+        "x-api-key",
+      ].includes(key);
+    });
+
+    if (
+      (authType === "bearer" ||
+        authType === "jwt") &&
+      bearer.trim()
+    ) {
+      filtered.push({
+        key: "Authorization",
+        value: `Bearer ${bearer.trim()}`,
+      });
+    }
+
+    if (
+      authType === "basic" &&
+      basicUser.trim() &&
+      basicPass.trim()
+    ) {
+      filtered.push({
+        key: "Authorization",
+        value: `Basic ${btoa(
+          `${basicUser}:${basicPass}`
+        )}`,
+      });
+    }
+
+    if (
+      authType === "api-key" &&
+      apiKey.trim()
+    ) {
+      filtered.push({
+        key: "x-api-key",
+        value: apiKey.trim(),
+      });
+    }
+
+    return filtered;
+  }, [
+    headers,
+    authType,
+    bearer,
+    basicUser,
+    basicPass,
+    apiKey,
+  ]);
+
+  // ─────────────────────────────────────────────────────────
+  // SEND REQUEST
+  // ─────────────────────────────────────────────────────────
 
   const handleSend = async () => {
     setLoading(true);
+
     setApiResponse(null);
     setSecurityResult(null);
 
     try {
-      // Build Headers
-      let headerObj: Record<string, string> = {};
-      headers.forEach((h) => {
-        if (h.key?.trim()) {
-          headerObj[h.key.trim()] = h.value.trim();
+      // ─────────────────────────────────────────────────────
+      // BUILD HEADERS
+      // ─────────────────────────────────────────────────────
+
+      const headerObj: Record<
+        string,
+        string
+      > = {};
+
+      syncedHeaders.forEach(
+        ({ key, value }) => {
+          if (key.trim()) {
+            headerObj[key.trim()] =
+              value.trim();
+          }
         }
-      });
+      );
 
-      // ==================== FIXED AUTHORIZATION ====================
-      if ((authType === "bearer" || authType === "jwt") && bearer.trim()) {
-        headerObj["Authorization"] = `Bearer ${bearer.trim()}`;
-      } else if (authType === "basic" && basicUser.trim() && basicPass.trim()) {
-        headerObj["Authorization"] = `Basic ${btoa(`${basicUser}:${basicPass}`)}`;
-      } else if (authType === "api-key" && apiKey.trim()) {
-        headerObj["x-api-key"] = apiKey.trim();
-      }
+      // ─────────────────────────────────────────────────────
+      // BODY
+      // ─────────────────────────────────────────────────────
 
-      console.log("📤 Final Headers Sent:", headerObj);
+      let finalBody: unknown =
+        undefined;
 
-      // Prepare Body
-      let finalBody: any = null;
-      if (bodyType !== "none" && body.trim() && !["GET", "HEAD", "DELETE"].includes(method)) {
+      const allowsBody =
+        !NO_BODY_METHODS.includes(method) &&
+        bodyType !== "none" &&
+        body.trim();
+
+      if (allowsBody) {
         if (bodyType === "json") {
           try {
             finalBody = JSON.parse(body);
           } catch {
             finalBody = body;
           }
-        } else if (bodyType === "graphql") {
-          let variables = {};
+        } else if (
+          bodyType === "graphql"
+        ) {
+          let variables: unknown = {};
+
           try {
-            variables = graphqlVariables ? JSON.parse(graphqlVariables) : {};
-          } catch {}
-          finalBody = { query: body, variables };
+            variables = graphqlVariables
+              ? JSON.parse(
+                  graphqlVariables
+                )
+              : {};
+          } catch {
+            variables = {};
+          }
+
+          finalBody = {
+            query: body,
+            variables,
+          };
         } else {
           finalBody = body;
         }
       }
 
-      // Make Actual API Request
-      const targetRes = await fetch(url, {
-        method,
-        headers: headerObj,
-        body: finalBody ? JSON.stringify(finalBody) : undefined,
-      });
+      // ─────────────────────────────────────────────────────
+      // TARGET REQUEST
+      // ─────────────────────────────────────────────────────
 
-      const rawText = await targetRes.text();
-      let responseBody: any;
+      const targetRes = await fetch(
+        "/api/proxy",
+        {
+          method,
+
+          headers: {
+            ...headerObj,
+            "x-proxy-url": url,
+          },
+
+          body:
+            allowsBody &&
+            finalBody !== undefined
+              ? typeof finalBody ===
+                "string"
+                ? finalBody
+                : JSON.stringify(
+                    finalBody
+                  )
+              : undefined,
+        }
+      );
+
+      const rawText =
+        await targetRes.text();
+
+      let responseBody: unknown;
+
       try {
-        responseBody = JSON.parse(rawText);
+        responseBody =
+          JSON.parse(rawText);
       } catch {
         responseBody = rawText;
       }
 
-      const fullResponse = {
-        status: targetRes.status,
-        statusText: targetRes.statusText,
-        headers: Object.fromEntries(targetRes.headers.entries()),
-        body: responseBody,
-        rawText,
-      };
+      const fullResponse: ApiResponse =
+        {
+          status: targetRes.status,
+          statusText:
+            targetRes.statusText,
+
+          headers:
+            Object.fromEntries(
+              targetRes.headers.entries()
+            ),
+
+          body: responseBody,
+          rawText,
+        };
 
       setApiResponse(fullResponse);
 
-      // Payload for Backend Analyzer
+      // ─────────────────────────────────────────────────────
+      // ANALYZER PAYLOAD
+      // ─────────────────────────────────────────────────────
+
       const analyzePayload = {
         request: {
           method,
           url,
-          headers: headerObj,
-          body: finalBody,
+
+          headers: {
+            ...headerObj,
+            "x-proxy-url": url,
+          },
+
+          body:
+            finalBody ?? null,
+
           bodyType,
         },
+
         response: fullResponse,
       };
 
-      console.log("📦 Sending to Analyzer:", analyzePayload);
+      const analyzeRes = await fetch(
+        BACKEND_URL,
+        {
+          method: "POST",
 
-      const analyzeRes = await fetch("http://localhost:8000/api/v1/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(analyzePayload),
-      });
+          headers: {
+            "Content-Type":
+              "application/json",
 
-      const analyzeData = await analyzeRes.json();
+            "x-api-key":
+              "trustedge123",
+          },
+
+          body: JSON.stringify(
+            analyzePayload
+          ),
+        }
+      );
+
+      if (!analyzeRes.ok) {
+        throw new Error(
+          `Backend returned ${analyzeRes.status}: ${analyzeRes.statusText}`
+        );
+      }
+
+      const analyzeData: SecurityResult =
+        await analyzeRes.json();
+
       setSecurityResult(analyzeData);
 
-      // Save to history
-      saveScan({
-        id: Date.now(),
-        url,
-        method,
-        result: analyzeData,
-        time: new Date().toLocaleString(),
-      });
+      setActiveTab("security");
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Request failed";
 
-    } catch (err: any) {
-      console.error(err);
-      setApiResponse({ error: err.message || "Request failed" });
+      console.error(
+        "[TrustEdge] Error:",
+        err
+      );
+
+      setApiResponse({
+        error: message,
+      });
     } finally {
       setLoading(false);
     }
   };
 
+  // ─────────────────────────────────────────────────────────
+  // DOWNLOAD REPORT
+  // ─────────────────────────────────────────────────────────
+
   const downloadReport = () => {
     if (!securityResult) return;
+
     const report = {
       ...securityResult,
-      generated_at: new Date().toISOString(),
+
+      generated_at:
+        new Date().toISOString(),
+
       analyzed_url: url,
       method,
     };
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `TrustEdge_Report_${new Date().toISOString().split("T")[0]}.json`;
+
+    const blob = new Blob(
+      [JSON.stringify(report, null, 2)],
+      {
+        type: "application/json",
+      }
+    );
+
+    const link =
+      document.createElement("a");
+
+    link.href =
+      URL.createObjectURL(blob);
+
+    link.download =
+      `TrustEdge_Report_${
+        new Date()
+          .toISOString()
+          .split("T")[0]
+      }.json`;
+
     link.click();
+
+    URL.revokeObjectURL(link.href);
   };
+
+  // ─────────────────────────────────────────────────────────
+  // SORT FINDINGS
+  // ─────────────────────────────────────────────────────────
+
+  const sortedFindings = [
+    ...(securityResult?.findings ?? []),
+  ].sort(
+    (a, b) =>
+      (severityOrder[b.severity] ??
+        0) -
+      (severityOrder[a.severity] ??
+        0)
+  );
+
+  // ─────────────────────────────────────────────────────────
+  // RENDER
+  // ─────────────────────────────────────────────────────────
 
   return (
     <motion.div
@@ -275,34 +614,63 @@ export default function Analyzer() {
       className="min-h-screen bg-[#0a0a0f] pb-12"
     >
       <div className="max-w-7xl mx-auto p-6 space-y-8">
-        {/* Header */}
+
+        {/* HEADER */}
+
         <div className="flex items-center gap-6">
           <motion.div
-            whileHover={{ scale: 1.1, rotate: 5 }}
+            whileHover={{
+              scale: 1.1,
+              rotate: 5,
+            }}
             className="p-5 rounded-3xl bg-gradient-to-br from-violet-600 via-fuchsia-600 to-purple-600 shadow-2xl shadow-purple-500/30"
           >
             <Zap className="w-14 h-14 text-white" />
           </motion.div>
+
           <div>
             <h1 className="text-7xl font-bold tracking-tighter bg-gradient-to-r from-white via-violet-200 to-fuchsia-200 bg-clip-text text-transparent">
               Trust_Edge
             </h1>
+
             <p className="text-slate-400 text-xl tracking-wide">
               ENTERPRISE API SECURITY PLATFORM
             </p>
           </div>
         </div>
 
-        {/* Request Bar */}
+        {/* REQUEST BAR */}
+
         <Card className="border border-slate-700/70 bg-slate-950/90 backdrop-blur-2xl shadow-2xl">
           <CardContent className="p-6 flex gap-4 items-center">
-            <Select value={method} onValueChange={setMethod}>
+
+            <Select
+              value={method}
+              onValueChange={(v) =>
+                setMethod(
+                  v as HttpMethod
+                )
+              }
+            >
               <SelectTrigger className="w-32 h-12">
                 <SelectValue />
               </SelectTrigger>
+
               <SelectContent>
-                {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].map((m) => (
-                  <SelectItem key={m} value={m}>
+                {(
+                  [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                    "HEAD",
+                  ] as HttpMethod[]
+                ).map((m) => (
+                  <SelectItem
+                    key={m}
+                    value={m}
+                  >
                     {m}
                   </SelectItem>
                 ))}
@@ -311,7 +679,11 @@ export default function Analyzer() {
 
             <Input
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) =>
+                setUrl(
+                  e.target.value
+                )
+              }
               className="flex-1 h-12 font-mono bg-slate-900/80 border-slate-700"
               placeholder="https://api.example.com"
             />
@@ -323,12 +695,36 @@ export default function Analyzer() {
             >
               <AnimatePresence mode="wait">
                 {loading ? (
-                  <motion.div className="flex items-center gap-2">
+                  <motion.div
+                    key="loading"
+                    initial={{
+                      opacity: 0,
+                    }}
+                    animate={{
+                      opacity: 1,
+                    }}
+                    exit={{
+                      opacity: 0,
+                    }}
+                    className="flex items-center gap-2"
+                  >
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                     Analyzing...
                   </motion.div>
                 ) : (
-                  <motion.div className="flex items-center gap-2">
+                  <motion.div
+                    key="idle"
+                    initial={{
+                      opacity: 0,
+                    }}
+                    animate={{
+                      opacity: 1,
+                    }}
+                    exit={{
+                      opacity: 0,
+                    }}
+                    className="flex items-center gap-2"
+                  >
                     <Play className="w-5 h-5" />
                     Send & Analyze
                   </motion.div>
@@ -339,210 +735,495 @@ export default function Analyzer() {
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-          {/* Request Configuration */}
+
+          {/* LEFT */}
+
           <div className="lg:col-span-3">
             <Card className="border-slate-700 bg-slate-950/90 h-full">
               <CardHeader>
-                <CardTitle className="text-3xl font-semibold">Request Configuration</CardTitle>
+                <CardTitle className="text-3xl font-semibold">
+                  Request Configuration
+                </CardTitle>
               </CardHeader>
+
               <CardContent className="p-8">
+
                 <Tabs defaultValue="auth">
+
                   <TabsList className="grid grid-cols-3 mb-8 bg-slate-900">
-                    <TabsTrigger value="auth">Authorization</TabsTrigger>
-                    <TabsTrigger value="headers">Headers</TabsTrigger>
-                    <TabsTrigger value="body">Body</TabsTrigger>
+                    <TabsTrigger value="auth">
+                      Authorization
+                    </TabsTrigger>
+
+                    <TabsTrigger value="headers">
+                      Headers
+                    </TabsTrigger>
+
+                    <TabsTrigger value="body">
+                      Body
+                    </TabsTrigger>
                   </TabsList>
 
-                  <TabsContent value="auth" className="space-y-5">
-                    <Select value={authType} onValueChange={(v: any) => setAuthType(v)}>
+                  {/* AUTH TAB */}
+
+                  <TabsContent
+                    value="auth"
+                    className="space-y-5"
+                  >
+
+                    <Select
+                      value={authType}
+                      onValueChange={(v) =>
+                        setAuthType(
+                          v as AuthType
+                        )
+                      }
+                    >
                       <SelectTrigger className="h-12">
                         <SelectValue />
                       </SelectTrigger>
+
                       <SelectContent>
-                        <SelectItem value="no-auth">No Authentication</SelectItem>
-                        <SelectItem value="bearer">Bearer Token</SelectItem>
-                        <SelectItem value="basic">Basic Auth</SelectItem>
-                        <SelectItem value="api-key">API Key</SelectItem>
-                        <SelectItem value="jwt">JWT Token</SelectItem>
+                        <SelectItem value="no-auth">
+                          No Authentication
+                        </SelectItem>
+
+                        <SelectItem value="bearer">
+                          Bearer Token
+                        </SelectItem>
+
+                        <SelectItem value="basic">
+                          Basic Auth
+                        </SelectItem>
+
+                        <SelectItem value="api-key">
+                          API Key
+                        </SelectItem>
+
+                        <SelectItem value="jwt">
+                          JWT Token
+                        </SelectItem>
                       </SelectContent>
                     </Select>
 
-                    {(authType === "bearer" || authType === "jwt") && (
+                    {(authType ===
+                      "bearer" ||
+                      authType ===
+                        "jwt") && (
                       <Input
                         value={bearer}
-                        onChange={(e) => setBearer(e.target.value)}
+                        onChange={(e) =>
+                          setBearer(
+                            e.target.value
+                          )
+                        }
                         placeholder="Enter Bearer / JWT Token"
                       />
                     )}
 
-                    {authType === "basic" && (
+                    {authType ===
+                      "basic" && (
                       <div className="grid grid-cols-2 gap-4">
                         <Input
                           value={basicUser}
-                          onChange={(e) => setBasicUser(e.target.value)}
+                          onChange={(e) =>
+                            setBasicUser(
+                              e.target
+                                .value
+                            )
+                          }
                           placeholder="Username"
                         />
+
                         <Input
                           value={basicPass}
-                          onChange={(e) => setBasicPass(e.target.value)}
+                          onChange={(e) =>
+                            setBasicPass(
+                              e.target
+                                .value
+                            )
+                          }
                           type="password"
                           placeholder="Password"
                         />
                       </div>
                     )}
 
-                    {authType === "api-key" && (
+                    {authType ===
+                      "api-key" && (
                       <Input
                         value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
+                        onChange={(e) =>
+                          setApiKey(
+                            e.target.value
+                          )
+                        }
                         placeholder="API Key"
                       />
                     )}
                   </TabsContent>
 
-                  <TabsContent value="headers" className="space-y-4">
-                    {headers.map((h, i) => (
-                      <div key={i} className="flex gap-3 items-center">
-                        <Input
-                          value={h.key}
-                          onChange={(e) => updateHeader(i, "key", e.target.value)}
-                          placeholder="Header Key"
-                        />
-                        <Input
-                          value={h.value}
-                          onChange={(e) => updateHeader(i, "value", e.target.value)}
-                          placeholder="Header Value"
-                        />
-                        <Button variant="ghost" onClick={() => removeHeader(i)}>
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
-                      </div>
-                    ))}
-                    <Button onClick={addHeader} variant="outline" className="w-full">
+                  {/* HEADERS TAB */}
+
+                  <TabsContent
+                    value="headers"
+                    className="space-y-4"
+                  >
+
+                    {syncedHeaders.map(
+                      (h, i) => {
+                        const isProtected =
+                          h.key.toLowerCase() ===
+                            "authorization" ||
+                          h.key.toLowerCase() ===
+                            "x-api-key";
+
+                        return (
+                          <div
+                            key={i}
+                            className="flex gap-3 items-center"
+                          >
+
+                            <Input
+                              value={h.key}
+                              disabled={
+                                isProtected
+                              }
+                              onChange={(e) =>
+                                updateHeader(
+                                  i,
+                                  "key",
+                                  e.target
+                                    .value
+                                )
+                              }
+                              placeholder="Header Key"
+                            />
+
+                            <Input
+                              value={h.value}
+                              disabled={
+                                isProtected
+                              }
+                              onChange={(e) =>
+                                updateHeader(
+                                  i,
+                                  "value",
+                                  e.target
+                                    .value
+                                )
+                              }
+                              placeholder="Header Value"
+                            />
+
+                            {!isProtected && (
+                              <Button
+                                variant="ghost"
+                                onClick={() =>
+                                  removeHeader(
+                                    i
+                                  )
+                                }
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </Button>
+                            )}
+                          </div>
+                        );
+                      }
+                    )}
+
+                    <Button
+                      onClick={addHeader}
+                      variant="outline"
+                      className="w-full"
+                    >
                       <Plus className="w-4 h-4 mr-2" />
                       Add Header
                     </Button>
                   </TabsContent>
 
-                  <TabsContent value="body" className="space-y-4">
-                    <Select value={bodyType} onValueChange={(v) => setBodyType(v as BodyType)}>
+                  {/* BODY TAB */}
+
+                  <TabsContent
+                    value="body"
+                    className="space-y-4"
+                  >
+
+                    <Select
+                      value={bodyType}
+                      onValueChange={(v) =>
+                        setBodyType(
+                          v as BodyType
+                        )
+                      }
+                    >
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
+
                       <SelectContent>
-                        <SelectItem value="none">none</SelectItem>
-                        <SelectItem value="json">JSON</SelectItem>
-                        <SelectItem value="raw">Raw</SelectItem>
-                        <SelectItem value="html">HTML</SelectItem>
-                        <SelectItem value="javascript">JavaScript</SelectItem>
-                        <SelectItem value="graphql">GraphQL</SelectItem>
+                        <SelectItem value="none">
+                          none
+                        </SelectItem>
+
+                        <SelectItem value="json">
+                          JSON
+                        </SelectItem>
+
+                        <SelectItem value="raw">
+                          Raw
+                        </SelectItem>
+
+                        <SelectItem value="html">
+                          HTML
+                        </SelectItem>
+
+                        <SelectItem value="javascript">
+                          JavaScript
+                        </SelectItem>
+
+                        <SelectItem value="graphql">
+                          GraphQL
+                        </SelectItem>
                       </SelectContent>
                     </Select>
 
-                    {bodyType !== "none" && (
+                    {bodyType !==
+                      "none" && (
                       <>
                         <Textarea
                           value={body}
-                          onChange={(e) => setBody(e.target.value)}
+                          onChange={(e) =>
+                            setBody(
+                              e.target
+                                .value
+                            )
+                          }
                           className="min-h-[320px] font-mono"
+                          placeholder="Request body..."
                         />
-                        {bodyType === "graphql" && (
+
+                        {bodyType ===
+                          "graphql" && (
                           <Textarea
-                            value={graphqlVariables}
-                            onChange={(e) => setGraphqlVariables(e.target.value)}
+                            value={
+                              graphqlVariables
+                            }
+                            onChange={(e) =>
+                              setGraphqlVariables(
+                                e.target
+                                  .value
+                              )
+                            }
                             className="min-h-[120px] font-mono"
                             placeholder="GraphQL Variables (JSON)"
                           />
                         )}
                       </>
                     )}
+
+                    {NO_BODY_METHODS.includes(
+                      method
+                    ) &&
+                      bodyType !==
+                        "none" && (
+                        <p className="text-yellow-400 text-sm">
+                          ⚠️ Body is ignored
+                          for {method} requests.
+                        </p>
+                      )}
                   </TabsContent>
                 </Tabs>
               </CardContent>
             </Card>
           </div>
 
-          {/* Analysis Console */}
+          {/* RIGHT */}
+
           <div className="lg:col-span-2">
             <Card className="border-slate-700 bg-slate-950/90 h-full">
+
               <CardHeader>
-                <CardTitle className="text-3xl font-semibold">Analysis Console</CardTitle>
+                <CardTitle className="text-3xl font-semibold">
+                  Analysis Console
+                </CardTitle>
               </CardHeader>
+
               <CardContent className="p-8">
-                <Tabs value={activeTab} onValueChange={(v: any) => setActiveTab(v)}>
+
+                <Tabs
+                  value={activeTab}
+                  onValueChange={(v) =>
+                    setActiveTab(
+                      v as
+                        | "response"
+                        | "security"
+                    )
+                  }
+                >
+
                   <TabsList className="grid grid-cols-2 mb-8 bg-slate-900">
-                    <TabsTrigger value="response">API Response</TabsTrigger>
-                    <TabsTrigger value="security">Security Analysis</TabsTrigger>
+                    <TabsTrigger value="response">
+                      API Response
+                    </TabsTrigger>
+
+                    <TabsTrigger value="security">
+                      Security Analysis
+                    </TabsTrigger>
                   </TabsList>
 
+                  {/* RESPONSE */}
+
                   <TabsContent value="response">
+
                     {!apiResponse ? (
                       <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                         <Eye className="w-16 h-16 mb-5 opacity-40" />
-                        <p>Send request to view response</p>
+                        <p>
+                          Send request to view
+                          response
+                        </p>
                       </div>
                     ) : (
                       <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
-                        {JSON.stringify(apiResponse, null, 2)}
+                        {JSON.stringify(
+                          apiResponse,
+                          null,
+                          2
+                        )}
                       </pre>
                     )}
                   </TabsContent>
 
+                  {/* SECURITY */}
+
                   <TabsContent value="security">
+
                     {!securityResult ? (
                       <div className="flex flex-col items-center justify-center py-24 text-slate-500">
                         <ShieldCheck className="w-20 h-20 mb-6 opacity-40" />
-                        <p>Security findings will appear here</p>
+
+                        <p>
+                          Security findings
+                          will appear here
+                        </p>
                       </div>
                     ) : (
                       <div className="space-y-6">
+
                         <div className="flex justify-between items-center">
                           <div>
-                            <h3 className="text-3xl font-semibold">Security Findings</h3>
+                            <h3 className="text-3xl font-semibold">
+                              Security
+                              Findings
+                            </h3>
+
                             <p className="text-slate-400">
-                              {securityResult.findings?.length || 0} issues • Risk Score:{" "}
+                              {
+                                securityResult
+                                  .findings
+                                  ?.length
+                              }{" "}
+                              issues • Risk
+                              Score:{" "}
                               <span className="text-orange-400 font-semibold">
-                                {securityResult.overall_risk_score || 0}%
+                                {
+                                  securityResult.overall_risk_score
+                                }
+                                %
                               </span>
                             </p>
                           </div>
-                          <Button onClick={downloadReport} className="bg-gradient-to-r from-purple-600 to-violet-600">
+
+                          <Button
+                            onClick={
+                              downloadReport
+                            }
+                            className="bg-gradient-to-r from-purple-600 to-violet-600"
+                          >
                             <Download className="mr-2 h-4 w-4" />
                             Export Report
                           </Button>
                         </div>
 
-                        {securityResult.findings?.length > 0 ? (
+                        {sortedFindings.length >
+                        0 ? (
                           <div className="space-y-6">
-                            {securityResult.findings
-                              .sort((a: any, b: any) => (severityOrder[b.severity] || 0) - (severityOrder[a.severity] || 0))
-                              .map((f: any, i: number) => (
+
+                            {sortedFindings.map(
+                              (
+                                f,
+                                i
+                              ) => (
                                 <motion.div
                                   key={i}
-                                  initial={{ opacity: 0, y: 30 }}
-                                  animate={{ opacity: 1, y: 0 }}
+                                  initial={{
+                                    opacity: 0,
+                                    y: 30,
+                                  }}
+                                  animate={{
+                                    opacity: 1,
+                                    y: 0,
+                                  }}
+                                  transition={{
+                                    delay:
+                                      i *
+                                      0.05,
+                                  }}
                                   className={`p-7 rounded-3xl border ${severityBorder[f.severity]} bg-slate-900/80`}
                                 >
+
                                   <div className="flex justify-between items-start gap-4">
+
                                     <div className="flex-1">
+
                                       <div className="flex items-center gap-4">
-                                        <AlertTriangle className="w-7 h-7 text-orange-400" />
-                                        <h4 className="text-2xl font-semibold">{f.issue}</h4>
+                                        <AlertTriangle className="w-7 h-7 text-orange-400 shrink-0" />
+
+                                        <h4 className="text-2xl font-semibold">
+                                          {
+                                            f.issue
+                                          }
+                                        </h4>
                                       </div>
-                                      {f.category && <p className="text-purple-400 mt-2 text-sm">Category: {f.category}</p>}
-                                      <p className="mt-4 text-slate-300 leading-relaxed">{f.description}</p>
+
+                                      {f.category && (
+                                        <p className="text-purple-400 mt-2 text-sm">
+                                          Category:{" "}
+                                          {
+                                            f.category
+                                          }
+                                        </p>
+                                      )}
+
+                                      <p className="mt-4 text-slate-300 leading-relaxed">
+                                        {
+                                          f.description
+                                        }
+                                      </p>
                                     </div>
-                                    <Badge className={`text-sm px-5 py-2 ${severityColors[f.severity]}`}>
-                                      {f.severity}
+
+                                    <Badge
+                                      className={`text-sm px-5 py-2 shrink-0 ${severityColors[f.severity]}`}
+                                    >
+                                      {
+                                        f.severity
+                                      }
                                     </Badge>
                                   </div>
                                 </motion.div>
-                              ))}
+                              )
+                            )}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center py-24 text-emerald-400">
                             <CheckCircle2 className="w-24 h-24 mx-auto mb-6" />
-                            <p className="text-3xl font-semibold">No Security Issues Found</p>
+
+                            <p className="text-3xl font-semibold">
+                              No Security
+                              Issues Found
+                            </p>
                           </div>
                         )}
                       </div>

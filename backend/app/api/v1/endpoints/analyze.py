@@ -1,34 +1,52 @@
-from fastapi import APIRouter, HTTPException
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+from app.db.postgres import get_db
 
 from app.services.full_analyzer import TrustEdgeAnalyzer
+from app.services.analyzer_storage import analyzer_storage
+
+from app.models.analyzer import SeverityEnum, ScanStatusEnum
 
 router = APIRouter()
-
 analyzer = TrustEdgeAnalyzer()
 
 
+# =========================================================
+# MAIN ANALYZE ENDPOINT (CLEAN VERSION)
+# =========================================================
+
 @router.post("/")
-async def analyze_direct(data: dict):
+async def analyze_direct(
+    data: dict,
+    db: Session = Depends(get_db),
+):
+
     try:
+        request_data = data.get("request", {})
+        response_data = data.get("response", {})
+
+        # =====================================================
+        # 1. RUN ANALYSIS ENGINE
+        # =====================================================
         result = analyzer.analyze_full_packet(
-            data.get("request", {}),
-            data.get("response", {})
+            request_data,
+            response_data
         )
 
-        ai_data = result.get("ai_suggestions")
+        findings = result.get("findings", [])
+        ai_data = result.get("ai_suggestions", {})
 
-        # ✅ Fix list/dict issue
+        # Safe AI normalization
         if isinstance(ai_data, list):
             ai_data = ai_data[0] if ai_data else {}
         if not isinstance(ai_data, dict):
             ai_data = {}
 
-        findings = result.get("findings", [])
-
-        # -------------------------
-        # 🔥 GROUP VULNERABILITIES
-        # -------------------------
+        # =====================================================
+        # 2. CATEGORY GROUPING (UI ONLY)
+        # =====================================================
         categorized = {
             "authentication": [],
             "headers": [],
@@ -38,15 +56,15 @@ async def analyze_direct(data: dict):
         }
 
         for item in findings:
-            issue = item.get("issue", "").lower()
+            issue = (item.get("issue") or "").lower()
 
             if "auth" in issue:
                 categorized["authentication"].append(item)
 
-            elif "header" in issue or "x-" in issue or "csp" in issue:
+            elif "header" in issue or "csp" in issue:
                 categorized["headers"].append(item)
 
-            elif "http" in issue or "ssl" in issue:
+            elif "http" in issue or "ssl" in issue or "tls" in issue:
                 categorized["transport"].append(item)
 
             elif "content" in issue or "body" in issue:
@@ -55,20 +73,36 @@ async def analyze_direct(data: dict):
             else:
                 categorized["other"].append(item)
 
-        # -------------------------
-        # 🎯 FINAL CLEAN RESPONSE
-        # -------------------------
+        # =====================================================
+        # 3. SAVE TO DATABASE (SERVICE LAYER)
+        # =====================================================
+        scan_id = analyzer_storage.save_analysis(
+            db=db,
+            request_data=request_data,
+            response_data=response_data,
+            analysis_result=result
+        )
+
+        print("SCAN ID:", scan_id)
+
+        if not scan_id:
+            raise Exception("Failed to persist analysis data")
+
+        # =====================================================
+        # 4. RESPONSE (CLEAN OUTPUT ONLY)
+        # =====================================================
         return {
             "success": True,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+
+            "scan_id": scan_id,  # useful for history UI
 
             "analysis": {
                 "risk_score": result.get("overall_risk_score", 0),
                 "severity": result.get("severity", "LOW"),
-
-                # ✅ NO raw findings here anymore
-                "vulnerabilities": categorized,
                 "total_issues": len(findings),
+
+                "vulnerabilities": categorized,
 
                 "ai_suggestions": {
                     "issue": ai_data.get("issue", ""),
@@ -79,4 +113,7 @@ async def analyze_direct(data: dict):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analyzer failed: {str(e)}"
+        )

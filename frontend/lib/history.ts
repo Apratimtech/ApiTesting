@@ -1,6 +1,6 @@
 // frontend/lib/history.ts
 export interface ScanHistory {
-  id: string;
+  id: number | string;
   url: string;
   method: string;
   risk: number;
