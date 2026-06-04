@@ -46,7 +46,7 @@ class AnalyzerStorageService:
 
         try:
 
-            logger.info("SAVE_ANALYSIS STARTED")
+            print("SAVE_ANALYSIS STARTED")
 
             # =================================================
             # MAIN SCAN
@@ -62,20 +62,6 @@ class AnalyzerStorageService:
                 method=request_data.get(
                     "method",
                     "GET",
-                ),
-
-                protocol=request_data.get(
-                    "protocol",
-                    "HTTP",
-                ),
-
-                duration_ms=analysis_result.get(
-                    "duration_ms"
-                ),
-
-                analyzer_version=analysis_result.get(
-                    "analyzer_version",
-                    "2.4",
                 ),
 
                 severity=analysis_result.get(
@@ -112,7 +98,7 @@ class AnalyzerStorageService:
 
             db.flush()
 
-            logger.info(f"SCAN CREATED: {scan.id}")
+            print(f"SCAN CREATED: {scan.id}")
 
             # =================================================
             # SAVE REQUEST
@@ -128,11 +114,6 @@ class AnalyzerStorageService:
 
                 method=request_data.get(
                     "method"
-                ),
-
-                protocol_metadata=request_data.get(
-                    "protocol_metadata",
-                    {},
                 ),
 
                 headers=request_data.get(
@@ -228,14 +209,14 @@ class AnalyzerStorageService:
                 db.add(finding_row)
 
             # =================================================
-            # COMMIT
+            # FINAL COMMIT
             # =================================================
 
-            logger.info("BEFORE DB COMMIT")
+            print("BEFORE DB COMMIT")
 
             db.commit()
 
-            logger.info("AFTER DB COMMIT")
+            print("AFTER DB COMMIT")
 
             db.refresh(scan)
 
@@ -249,6 +230,8 @@ class AnalyzerStorageService:
 
             db.rollback()
 
+            print("DATABASE ERROR:", str(e))
+
             logger.exception(
                 f"Storage failure: {str(e)}"
             )
@@ -261,3 +244,4 @@ class AnalyzerStorageService:
 # =========================================================
 
 analyzer_storage = AnalyzerStorageService()
+

@@ -73,6 +73,11 @@ class AnalyzerScan(Base):
         nullable=False,
     )
 
+    protocol = Column(
+        String(20),
+        default="HTTP",
+    )
+
     overall_risk_score = Column(
         Integer,
         default=0,
@@ -87,6 +92,14 @@ class AnalyzerScan(Base):
 
     generated_by = Column(
         String(255),
+    )
+
+    analyzer_version = Column(
+        String(20),
+    )
+
+    duration_ms = Column(
+        Integer,
     )
 
     is_deleted = Column(
@@ -230,6 +243,10 @@ class AnalyzerRequest(Base):
 
     body_type = Column(
         String(50),
+    )
+
+    protocol_metadata = Column(
+        JSON,
     )
 
     created_at = Column(
