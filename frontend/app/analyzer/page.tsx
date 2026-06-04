@@ -24,6 +24,8 @@ import {
   Download,
   AlertTriangle,
   CheckCircle2,
+  Copy,
+  RotateCw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -63,13 +65,7 @@ interface Header {
 
 interface Finding {
   issue: string;
-  severity:
-    | "CRITICAL"
-    | "HIGH"
-    | "MEDIUM"
-    | "LOW"
-    | "INFO";
-
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
   description: string;
   category?: string;
 }
@@ -77,6 +73,7 @@ interface Finding {
 interface SecurityResult {
   findings?: Finding[];
   overall_risk_score?: number;
+  success?: boolean;
 }
 
 interface ApiResponse {
@@ -92,14 +89,11 @@ interface ApiResponse {
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
 
-const BACKEND_URL =
-  "http://localhost:8000/api/v1/analyze";
+const BACKEND_URL = "http://localhost:8000/api/v1/analyze";
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB
+const MAX_DISPLAY_SIZE = 50000;
 
-const NO_BODY_METHODS: HttpMethod[] = [
-  "GET",
-  "HEAD",
-  "DELETE",
-];
+const NO_BODY_METHODS: HttpMethod[] = ["GET", "HEAD", "DELETE"];
 
 const DEFAULT_JSON_BODY = `{
   "username": "admin",
@@ -135,1095 +129,554 @@ const severityOrder: Record<string, number> = {
 // ─────────────────────────────────────────────────────────────
 
 export default function Analyzer() {
-  const [method, setMethod] =
-    useState<HttpMethod>("POST");
+  const [method, setMethod] = useState<HttpMethod>("POST");
+  const [url, setUrl] = useState("https://httpbin.org/anything");
 
-  const [url, setUrl] = useState(
-    "https://httpbin.org/anything"
-  );
-
-  // ─────────────────────────────────────────────────────────
   // AUTH
-  // ─────────────────────────────────────────────────────────
+  const [authType, setAuthType] = useState<AuthType>("bearer");
+  const [bearer, setBearer] = useState("");
+  const [basicUser, setBasicUser] = useState("");
+  const [basicPass, setBasicPass] = useState("");
+  const [apiKey, setApiKey] = useState("");
 
-  const [authType, setAuthType] =
-    useState<AuthType>("bearer");
-
-  const [bearer, setBearer] =
-    useState("");
-
-  const [basicUser, setBasicUser] =
-    useState("");
-
-  const [basicPass, setBasicPass] =
-    useState("");
-
-  const [apiKey, setApiKey] =
-    useState("");
-
-  // ─────────────────────────────────────────────────────────
   // HEADERS
-  // ─────────────────────────────────────────────────────────
+  const [headers, setHeaders] = useState<Header[]>([
+    { key: "Content-Type", value: "application/json" },
+  ]);
 
-  const [headers, setHeaders] =
-    useState<Header[]>([
-      {
-        key: "Content-Type",
-        value: "application/json",
-      },
-    ]);
-
-  // ─────────────────────────────────────────────────────────
   // BODY
-  // ─────────────────────────────────────────────────────────
+  const [bodyType, setBodyType] = useState<BodyType>("json");
+  const [body, setBody] = useState(DEFAULT_JSON_BODY);
+  const [graphqlVariables, setGraphqlVariables] = useState(`{\n  "id": 1\n}`);
 
-  const [bodyType, setBodyType] =
-    useState<BodyType>("json");
-
-  const [body, setBody] =
-    useState(DEFAULT_JSON_BODY);
-
-  const [graphqlVariables, setGraphqlVariables] =
-    useState(`{\n  "id": 1\n}`);
-
-  // ─────────────────────────────────────────────────────────
   // RESULTS
-  // ─────────────────────────────────────────────────────────
+  const [apiResponse, setApiResponse] = useState<ApiResponse | null>(null);
+  const [securityResult, setSecurityResult] = useState<SecurityResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<"response" | "security">("security");
+  const [responseSubTab, setResponseSubTab] = useState<"body" | "headers" | "raw">("body");
 
-  const [apiResponse, setApiResponse] =
-    useState<ApiResponse | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
-  const [securityResult, setSecurityResult] =
-    useState<SecurityResult | null>(null);
-
-  const [loading, setLoading] =
-    useState(false);
-
-  const [activeTab, setActiveTab] =
-    useState<"response" | "security">(
-      "security"
-    );
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const prevBodyType = useRef<BodyType>(bodyType);
+  const lastRequestRef = useRef<any>(null);
 
   // ─────────────────────────────────────────────────────────
-  // PREVIOUS BODY TYPE
+  // TOAST
   // ─────────────────────────────────────────────────────────
-
-  const prevBodyType =
-    useRef<BodyType>(bodyType);
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2500);
+  };
 
   // ─────────────────────────────────────────────────────────
-  // BODY TYPE DEFAULTS
+  // VALIDATION & SANITIZATION
   // ─────────────────────────────────────────────────────────
+  const isValidUrl = (str: string): boolean => {
+    try {
+      const u = new URL(str);
+      return u.protocol === "http:" || u.protocol === "https:";
+    } catch {
+      return false;
+    }
+  };
 
+  const sanitizeHeaderValue = (value: string): string => {
+    return value.replace(/[\r\n]/g, "");
+  };
+
+  // ─────────────────────────────────────────────────────────
+  // BODY TYPE SYNC
+  // ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (prevBodyType.current === bodyType)
-      return;
-
+    if (prevBodyType.current === bodyType) return;
     prevBodyType.current = bodyType;
 
     switch (bodyType) {
       case "none":
         setBody("");
         break;
-
       case "json":
         setBody(DEFAULT_JSON_BODY);
         break;
-
       case "html":
         setBody("<h1>Hello World</h1>");
         break;
-
       case "javascript":
         setBody("// JavaScript payload");
         break;
-
       case "graphql":
-        setBody(
-          `query User($id: ID!) {\n  user(id: $id) {\n    id\n    name\n  }\n}`
-        );
+        setBody(`query User($id: ID!) {\n  user(id: $id) {\n    id\n    name\n  }\n}`);
         break;
-
       default:
         setBody("");
+    }
+  }, [bodyType]);
+
+  useEffect(() => {
+    const contentTypeMap: Partial<Record<BodyType, string>> = {
+      json: "application/json",
+      graphql: "application/json",
+      html: "text/html",
+      javascript: "application/javascript",
+      "x-www-form-urlencoded": "application/x-www-form-urlencoded",
+    };
+
+    if (contentTypeMap[bodyType]) {
+      setHeaders((prev) => {
+        const filtered = prev.filter((h) => h.key.toLowerCase() !== "content-type");
+        return [...filtered, { key: "Content-Type", value: contentTypeMap[bodyType]! }];
+      });
     }
   }, [bodyType]);
 
   // ─────────────────────────────────────────────────────────
   // HEADER HELPERS
   // ─────────────────────────────────────────────────────────
-
-  const addHeader = () => {
-    setHeaders((prev) => [
-      ...prev,
-      { key: "", value: "" },
-    ]);
-  };
+  const addHeader = () => setHeaders((prev) => [...prev, { key: "", value: "" }]);
 
   const removeHeader = (index: number) => {
-    setHeaders((prev) =>
-      prev.filter((_, i) => i !== index)
-    );
+    setHeaders((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const updateHeader = (
-    index: number,
-    field: keyof Header,
-    value: string
-  ) => {
+  const updateHeader = (index: number, field: keyof Header, value: string) => {
     setHeaders((prev) =>
       prev.map((h, i) =>
-        i === index
-          ? {
-              ...h,
-              [field]: value,
-            }
-          : h
+        i === index ? { ...h, [field]: sanitizeHeaderValue(value) } : h
       )
     );
   };
 
-  // ─────────────────────────────────────────────────────────
-  // AUTH → HEADER SYNC
-  // REAL POSTMAN-LIKE BEHAVIOR
-  // ─────────────────────────────────────────────────────────
-
   const syncedHeaders = useMemo(() => {
-    const cleanHeaders = headers.filter(
-      (h) => h.key.trim() !== ""
-    );
+    const clean = headers.filter((h) => h.key.trim() !== "");
+    const normalized = new Map<string, string>();
 
-    const filtered = cleanHeaders.filter((h) => {
-      const key = h.key.toLowerCase();
-
-      return ![
-        "authorization",
-        "x-api-key",
-      ].includes(key);
+    clean.forEach(({ key, value }) => {
+      const lower = key.toLowerCase().trim();
+      if (!["authorization", "x-api-key"].includes(lower)) {
+        normalized.set(lower, value.trim());
+      }
     });
 
-    if (
-      (authType === "bearer" ||
-        authType === "jwt") &&
-      bearer.trim()
-    ) {
-      filtered.push({
-        key: "Authorization",
-        value: `Bearer ${bearer.trim()}`,
-      });
+    if ((authType === "bearer" || authType === "jwt") && bearer.trim()) {
+      normalized.set("authorization", `Bearer ${bearer.trim()}`);
     }
 
-    if (
-      authType === "basic" &&
-      basicUser.trim() &&
-      basicPass.trim()
-    ) {
-      filtered.push({
-        key: "Authorization",
-        value: `Basic ${btoa(
-          `${basicUser}:${basicPass}`
-        )}`,
-      });
+    if (authType === "basic" && basicUser.trim() && basicPass.trim()) {
+      const credentials = `${basicUser}:${basicPass}`;
+      const encoded = btoa(unescape(encodeURIComponent(credentials)));
+      normalized.set("authorization", `Basic ${encoded}`);
     }
 
-    if (
-      authType === "api-key" &&
-      apiKey.trim()
-    ) {
-      filtered.push({
-        key: "x-api-key",
-        value: apiKey.trim(),
-      });
+    if (authType === "api-key" && apiKey.trim()) {
+      normalized.set("x-api-key", apiKey.trim());
     }
 
-    return filtered;
-  }, [
-    headers,
-    authType,
-    bearer,
-    basicUser,
-    basicPass,
-    apiKey,
-  ]);
+    return Array.from(normalized.entries()).map(([key, value]) => ({
+      key: key
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join("-"),
+      value,
+    }));
+  }, [headers, authType, bearer, basicUser, basicPass, apiKey]);
 
   // ─────────────────────────────────────────────────────────
-  // SEND REQUEST
+  // REQUEST LOGIC
   // ─────────────────────────────────────────────────────────
+  const performRequest = async (payloadUrl?: string, payloadMethod?: HttpMethod) => {
+    const targetUrl = payloadUrl || url;
+    const targetMethod = payloadMethod || method;
 
-  const handleSend = async () => {
+    if (!isValidUrl(targetUrl)) {
+      showToast("Please enter a valid HTTP/HTTPS URL", "error");
+      return;
+    }
+
+    if (body.length > MAX_BODY_SIZE) {
+      showToast("Body size exceeds 1MB limit", "error");
+      return;
+    }
+
     setLoading(true);
-
     setApiResponse(null);
     setSecurityResult(null);
 
+    abortControllerRef.current = new AbortController();
+    const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000);
+
     try {
-      // ─────────────────────────────────────────────────────
-      // BUILD HEADERS
-      // ─────────────────────────────────────────────────────
+      const headerObj: Record<string, string> = {};
+      syncedHeaders.forEach(({ key, value }) => {
+        headerObj[key] = value;
+      });
 
-      const headerObj: Record<
-        string,
-        string
-      > = {};
+      const allowsBody = !NO_BODY_METHODS.includes(targetMethod) && bodyType !== "none" && body.trim();
 
-      syncedHeaders.forEach(
-        ({ key, value }) => {
-          if (key.trim()) {
-            headerObj[key.trim()] =
-              value.trim();
-          }
-        }
-      );
-
-      // ─────────────────────────────────────────────────────
-      // BODY
-      // ─────────────────────────────────────────────────────
-
-      let finalBody: unknown =
-        undefined;
-
-      const allowsBody =
-        !NO_BODY_METHODS.includes(method) &&
-        bodyType !== "none" &&
-        body.trim();
-
+      let finalBody: unknown = undefined;
       if (allowsBody) {
         if (bodyType === "json") {
+          try { finalBody = JSON.parse(body); } catch { finalBody = body; }
+        } else if (bodyType === "graphql") {
+          let variables = {};
           try {
-            finalBody = JSON.parse(body);
+            variables = graphqlVariables ? JSON.parse(graphqlVariables) : {};
           } catch {
-            finalBody = body;
+            showToast("Invalid GraphQL Variables JSON", "error");
+            return;
           }
-        } else if (
-          bodyType === "graphql"
-        ) {
-          let variables: unknown = {};
-
-          try {
-            variables = graphqlVariables
-              ? JSON.parse(
-                  graphqlVariables
-                )
-              : {};
-          } catch {
-            variables = {};
-          }
-
-          finalBody = {
-            query: body,
-            variables,
-          };
+          finalBody = { query: body, variables };
         } else {
           finalBody = body;
         }
       }
 
-      // ─────────────────────────────────────────────────────
-      // TARGET REQUEST
-      // ─────────────────────────────────────────────────────
+      const targetRes = await fetch("/api/proxy", {
+        method: targetMethod,
+        headers: { ...headerObj, "x-proxy-url": targetUrl },
+        body: allowsBody && finalBody !== undefined
+          ? typeof finalBody === "string" ? finalBody : JSON.stringify(finalBody)
+          : undefined,
+        signal: abortControllerRef.current.signal,
+      });
 
-      const targetRes = await fetch(
-        "/api/proxy",
-        {
-          method,
-
-          headers: {
-            ...headerObj,
-            "x-proxy-url": url,
-          },
-
-          body:
-            allowsBody &&
-            finalBody !== undefined
-              ? typeof finalBody ===
-                "string"
-                ? finalBody
-                : JSON.stringify(
-                    finalBody
-                  )
-              : undefined,
-        }
-      );
-
-      const rawText =
-        await targetRes.text();
-
+      const rawText = await targetRes.text();
       let responseBody: unknown;
+      try { responseBody = JSON.parse(rawText); } catch { responseBody = rawText; }
 
-      try {
-        responseBody =
-          JSON.parse(rawText);
-      } catch {
-        responseBody = rawText;
-      }
-
-      const fullResponse: ApiResponse =
-        {
-          status: targetRes.status,
-          statusText:
-            targetRes.statusText,
-
-          headers:
-            Object.fromEntries(
-              targetRes.headers.entries()
-            ),
-
-          body: responseBody,
-          rawText,
-        };
-
-      setApiResponse(fullResponse);
-
-      // ─────────────────────────────────────────────────────
-      // ANALYZER PAYLOAD
-      // ─────────────────────────────────────────────────────
-
-      const analyzePayload = {
-        request: {
-          method,
-          url,
-
-          headers: {
-            ...headerObj,
-            "x-proxy-url": url,
-          },
-
-          body:
-            finalBody ?? null,
-
-          bodyType,
-        },
-
-        response: fullResponse,
+      const fullResponse: ApiResponse = {
+        status: targetRes.status,
+        statusText: targetRes.statusText,
+        headers: Object.fromEntries(targetRes.headers.entries()),
+        body: responseBody,
+        rawText,
       };
 
-      const analyzeRes = await fetch(
-        BACKEND_URL,
-        {
-          method: "POST",
+      setApiResponse(fullResponse);
+      lastRequestRef.current = { url: targetUrl, method: targetMethod };
 
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            "x-api-key":
-              "trustedge123",
-          },
-
-          body: JSON.stringify(
-            analyzePayload
-          ),
-        }
-      );
-
-      if (!analyzeRes.ok) {
-        throw new Error(
-          `Backend returned ${analyzeRes.status}: ${analyzeRes.statusText}`
-        );
+      const safeResponse = { ...fullResponse };
+      if (typeof safeResponse.rawText === "string" && safeResponse.rawText.length > MAX_DISPLAY_SIZE) {
+        safeResponse.rawText = safeResponse.rawText.substring(0, MAX_DISPLAY_SIZE) + "\n... [TRUNCATED]";
       }
 
-      const analyzeData: SecurityResult =
-        await analyzeRes.json();
+      const analyzePayload = {
+        request: { method: targetMethod, url: targetUrl, headers: headerObj, body: finalBody ?? null, bodyType },
+        response: safeResponse,
+      };
 
-      setSecurityResult(analyzeData);
+      const analyzeRes = await fetch(BACKEND_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(analyzePayload),
+      });
+
+      if (!analyzeRes.ok) throw new Error(`Analyzer error: ${analyzeRes.status}`);
+
+      const analyzeData = await analyzeRes.json();
+      setSecurityResult({
+        ...analyzeData,
+        overall_risk_score: Math.min(100, Math.max(0, analyzeData.overall_risk_score || 0)),
+      });
 
       setActiveTab("security");
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : "Request failed";
-
-      console.error(
-        "[TrustEdge] Error:",
-        err
-      );
-
-      setApiResponse({
-        error: message,
-      });
+    } catch (err: any) {
+      showToast(err.message || "Request failed", "error");
+      setApiResponse({ error: err.message || "Request failed" });
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   };
 
-  // ─────────────────────────────────────────────────────────
-  // DOWNLOAD REPORT
-  // ─────────────────────────────────────────────────────────
+  const handleSend = () => performRequest();
+  const handleReplay = () => {
+    if (lastRequestRef.current) {
+      performRequest(lastRequestRef.current.url, lastRequestRef.current.method);
+    } else {
+      showToast("No previous request to replay", "error");
+    }
+  };
+
+  const copyToClipboard = (text: string, label: string) => {
+    navigator.clipboard.writeText(text);
+    showToast(`${label} copied`);
+  };
 
   const downloadReport = () => {
     if (!securityResult) return;
-
     const report = {
       ...securityResult,
-
-      generated_at:
-        new Date().toISOString(),
-
+      generated_at: new Date().toISOString(),
       analyzed_url: url,
       method,
     };
-
-    const blob = new Blob(
-      [JSON.stringify(report, null, 2)],
-      {
-        type: "application/json",
-      }
-    );
-
-    const link =
-      document.createElement("a");
-
-    link.href =
-      URL.createObjectURL(blob);
-
-    link.download =
-      `TrustEdge_Report_${
-        new Date()
-          .toISOString()
-          .split("T")[0]
-      }.json`;
-
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `TrustEdge_Report_${new Date().toISOString().split("T")[0]}.json`;
     link.click();
-
     URL.revokeObjectURL(link.href);
   };
 
-  // ─────────────────────────────────────────────────────────
-  // SORT FINDINGS
-  // ─────────────────────────────────────────────────────────
-
-  const sortedFindings = [
-    ...(securityResult?.findings ?? []),
-  ].sort(
-    (a, b) =>
-      (severityOrder[b.severity] ??
-        0) -
-      (severityOrder[a.severity] ??
-        0)
+  const sortedFindings = [...(securityResult?.findings ?? [])].sort(
+    (a, b) => (severityOrder[b.severity] ?? 0) - (severityOrder[a.severity] ?? 0)
   );
 
-  // ─────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────
+  const displayResponseBody = (resp: ApiResponse) => {
+    if (!resp.rawText) return "No body";
+    if (resp.rawText.length > MAX_DISPLAY_SIZE) {
+      return resp.rawText.substring(0, MAX_DISPLAY_SIZE) + "\n\n... [TRUNCATED]";
+    }
+    return resp.rawText;
+  };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      className="min-h-screen bg-[#0a0a0f] pb-12"
-    >
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-screen bg-[#0a0a0f] pb-12">
       <div className="max-w-7xl mx-auto p-6 space-y-8">
-
-        {/* HEADER */}
-
         <div className="flex items-center gap-6">
-          <motion.div
-            whileHover={{
-              scale: 1.1,
-              rotate: 5,
-            }}
-            className="p-5 rounded-3xl bg-gradient-to-br from-violet-600 via-fuchsia-600 to-purple-600 shadow-2xl shadow-purple-500/30"
-          >
+          <motion.div whileHover={{ scale: 1.1, rotate: 5 }} className="p-5 rounded-3xl bg-gradient-to-br from-violet-600 via-fuchsia-600 to-purple-600 shadow-2xl shadow-purple-500/30">
             <Zap className="w-14 h-14 text-white" />
           </motion.div>
-
           <div>
             <h1 className="text-7xl font-bold tracking-tighter bg-gradient-to-r from-white via-violet-200 to-fuchsia-200 bg-clip-text text-transparent">
               Trust_Edge
             </h1>
-
-            <p className="text-slate-400 text-xl tracking-wide">
-              ENTERPRISE API SECURITY PLATFORM
-            </p>
+            <p className="text-slate-400 text-xl tracking-wide">ENTERPRISE API SECURITY PLATFORM</p>
           </div>
         </div>
 
-        {/* REQUEST BAR */}
-
         <Card className="border border-slate-700/70 bg-slate-950/90 backdrop-blur-2xl shadow-2xl">
           <CardContent className="p-6 flex gap-4 items-center">
-
-            <Select
-              value={method}
-              onValueChange={(v) =>
-                setMethod(
-                  v as HttpMethod
-                )
-              }
-            >
-              <SelectTrigger className="w-32 h-12">
-                <SelectValue />
-              </SelectTrigger>
-
+            <Select value={method} onValueChange={(v) => setMethod(v as HttpMethod)}>
+              <SelectTrigger className="w-32 h-12"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {(
-                  [
-                    "GET",
-                    "POST",
-                    "PUT",
-                    "PATCH",
-                    "DELETE",
-                    "HEAD",
-                  ] as HttpMethod[]
-                ).map((m) => (
-                  <SelectItem
-                    key={m}
-                    value={m}
-                  >
-                    {m}
-                  </SelectItem>
+                {(["GET","POST","PUT","PATCH","DELETE","HEAD"] as HttpMethod[]).map(m => (
+                  <SelectItem key={m} value={m}>{m}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
 
-            <Input
-              value={url}
-              onChange={(e) =>
-                setUrl(
-                  e.target.value
-                )
-              }
-              className="flex-1 h-12 font-mono bg-slate-900/80 border-slate-700"
-              placeholder="https://api.example.com"
-            />
+            <Input value={url} onChange={(e) => setUrl(e.target.value)} className="flex-1 h-12 font-mono bg-slate-900/80 border-slate-700" placeholder="https://api.example.com" />
 
-            <Button
-              onClick={handleSend}
-              disabled={loading}
-              className="h-12 px-10 bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700"
-            >
+            <Button onClick={handleSend} disabled={loading} className="h-12 px-10 bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700">
               <AnimatePresence mode="wait">
                 {loading ? (
-                  <motion.div
-                    key="loading"
-                    initial={{
-                      opacity: 0,
-                    }}
-                    animate={{
-                      opacity: 1,
-                    }}
-                    exit={{
-                      opacity: 0,
-                    }}
-                    className="flex items-center gap-2"
-                  >
+                  <motion.div key="loading" className="flex items-center gap-2">
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                     Analyzing...
                   </motion.div>
                 ) : (
-                  <motion.div
-                    key="idle"
-                    initial={{
-                      opacity: 0,
-                    }}
-                    animate={{
-                      opacity: 1,
-                    }}
-                    exit={{
-                      opacity: 0,
-                    }}
-                    className="flex items-center gap-2"
-                  >
-                    <Play className="w-5 h-5" />
-                    Send & Analyze
+                  <motion.div key="idle" className="flex items-center gap-2">
+                    <Play className="w-5 h-5" /> Send & Analyze
                   </motion.div>
                 )}
               </AnimatePresence>
             </Button>
+
+            {lastRequestRef.current && (
+              <Button onClick={handleReplay} disabled={loading} variant="outline">
+                <RotateCw className="w-4 h-4 mr-2" /> Replay
+              </Button>
+            )}
           </CardContent>
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-
-          {/* LEFT */}
-
           <div className="lg:col-span-3">
             <Card className="border-slate-700 bg-slate-950/90 h-full">
-              <CardHeader>
-                <CardTitle className="text-3xl font-semibold">
-                  Request Configuration
-                </CardTitle>
-              </CardHeader>
-
+              <CardHeader><CardTitle className="text-3xl font-semibold">Request Configuration</CardTitle></CardHeader>
               <CardContent className="p-8">
-
                 <Tabs defaultValue="auth">
-
                   <TabsList className="grid grid-cols-3 mb-8 bg-slate-900">
-                    <TabsTrigger value="auth">
-                      Authorization
-                    </TabsTrigger>
-
-                    <TabsTrigger value="headers">
-                      Headers
-                    </TabsTrigger>
-
-                    <TabsTrigger value="body">
-                      Body
-                    </TabsTrigger>
+                    <TabsTrigger value="auth">Authorization</TabsTrigger>
+                    <TabsTrigger value="headers">Headers</TabsTrigger>
+                    <TabsTrigger value="body">Body</TabsTrigger>
                   </TabsList>
 
-                  {/* AUTH TAB */}
-
-                  <TabsContent
-                    value="auth"
-                    className="space-y-5"
-                  >
-
-                    <Select
-                      value={authType}
-                      onValueChange={(v) =>
-                        setAuthType(
-                          v as AuthType
-                        )
-                      }
-                    >
-                      <SelectTrigger className="h-12">
-                        <SelectValue />
-                      </SelectTrigger>
-
+                  <TabsContent value="auth" className="space-y-5">
+                    <Select value={authType} onValueChange={(v) => setAuthType(v as AuthType)}>
+                      <SelectTrigger className="h-12"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="no-auth">
-                          No Authentication
-                        </SelectItem>
-
-                        <SelectItem value="bearer">
-                          Bearer Token
-                        </SelectItem>
-
-                        <SelectItem value="basic">
-                          Basic Auth
-                        </SelectItem>
-
-                        <SelectItem value="api-key">
-                          API Key
-                        </SelectItem>
-
-                        <SelectItem value="jwt">
-                          JWT Token
-                        </SelectItem>
+                        <SelectItem value="no-auth">No Authentication</SelectItem>
+                        <SelectItem value="bearer">Bearer Token</SelectItem>
+                        <SelectItem value="basic">Basic Auth</SelectItem>
+                        <SelectItem value="api-key">API Key</SelectItem>
+                        <SelectItem value="jwt">JWT Token</SelectItem>
                       </SelectContent>
                     </Select>
 
-                    {(authType ===
-                      "bearer" ||
-                      authType ===
-                        "jwt") && (
-                      <Input
-                        value={bearer}
-                        onChange={(e) =>
-                          setBearer(
-                            e.target.value
-                          )
-                        }
-                        placeholder="Enter Bearer / JWT Token"
-                      />
+                    {(authType === "bearer" || authType === "jwt") && (
+                      <Input value={bearer} onChange={(e) => setBearer(e.target.value)} placeholder="Enter Bearer / JWT Token" />
                     )}
 
-                    {authType ===
-                      "basic" && (
+                    {authType === "basic" && (
                       <div className="grid grid-cols-2 gap-4">
-                        <Input
-                          value={basicUser}
-                          onChange={(e) =>
-                            setBasicUser(
-                              e.target
-                                .value
-                            )
-                          }
-                          placeholder="Username"
-                        />
-
-                        <Input
-                          value={basicPass}
-                          onChange={(e) =>
-                            setBasicPass(
-                              e.target
-                                .value
-                            )
-                          }
-                          type="password"
-                          placeholder="Password"
-                        />
+                        <Input value={basicUser} onChange={(e) => setBasicUser(e.target.value)} placeholder="Username" />
+                        <Input value={basicPass} onChange={(e) => setBasicPass(e.target.value)} type="password" placeholder="Password" />
                       </div>
                     )}
 
-                    {authType ===
-                      "api-key" && (
-                      <Input
-                        value={apiKey}
-                        onChange={(e) =>
-                          setApiKey(
-                            e.target.value
-                          )
-                        }
-                        placeholder="API Key"
-                      />
+                    {authType === "api-key" && (
+                      <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" />
                     )}
                   </TabsContent>
 
-                  {/* HEADERS TAB */}
-
-                  <TabsContent
-                    value="headers"
-                    className="space-y-4"
-                  >
-
-                    {syncedHeaders.map(
-                      (h, i) => {
-                        const isProtected =
-                          h.key.toLowerCase() ===
-                            "authorization" ||
-                          h.key.toLowerCase() ===
-                            "x-api-key";
-
-                        return (
-                          <div
-                            key={i}
-                            className="flex gap-3 items-center"
-                          >
-
-                            <Input
-                              value={h.key}
-                              disabled={
-                                isProtected
-                              }
-                              onChange={(e) =>
-                                updateHeader(
-                                  i,
-                                  "key",
-                                  e.target
-                                    .value
-                                )
-                              }
-                              placeholder="Header Key"
-                            />
-
-                            <Input
-                              value={h.value}
-                              disabled={
-                                isProtected
-                              }
-                              onChange={(e) =>
-                                updateHeader(
-                                  i,
-                                  "value",
-                                  e.target
-                                    .value
-                                )
-                              }
-                              placeholder="Header Value"
-                            />
-
-                            {!isProtected && (
-                              <Button
-                                variant="ghost"
-                                onClick={() =>
-                                  removeHeader(
-                                    i
-                                  )
-                                }
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
-                        );
-                      }
-                    )}
-
-                    <Button
-                      onClick={addHeader}
-                      variant="outline"
-                      className="w-full"
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      Add Header
+                  <TabsContent value="headers" className="space-y-4">
+                    {syncedHeaders.map((h, i) => {
+                      const isProtected = ["authorization", "x-api-key"].includes(h.key.toLowerCase());
+                      return (
+                        <div key={i} className="flex gap-3 items-center">
+                          <Input 
+                            value={h.key} 
+                            disabled={isProtected} 
+                            placeholder="Header Key" 
+                            onChange={() => {}} // Prevents React warning
+                          />
+                          <Input 
+                            value={h.value} 
+                            disabled={isProtected} 
+                            placeholder="Header Value" 
+                            onChange={() => {}} // Prevents React warning
+                          />
+                          {!isProtected && (
+                            <Button variant="ghost" onClick={() => removeHeader(i)}>
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <Button onClick={addHeader} variant="outline" className="w-full">
+                      <Plus className="w-4 h-4 mr-2" /> Add Header
                     </Button>
                   </TabsContent>
 
-                  {/* BODY TAB */}
-
-                  <TabsContent
-                    value="body"
-                    className="space-y-4"
-                  >
-
-                    <Select
-                      value={bodyType}
-                      onValueChange={(v) =>
-                        setBodyType(
-                          v as BodyType
-                        )
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-
+                  <TabsContent value="body" className="space-y-4">
+                    <Select value={bodyType} onValueChange={(v) => setBodyType(v as BodyType)}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="none">
-                          none
-                        </SelectItem>
-
-                        <SelectItem value="json">
-                          JSON
-                        </SelectItem>
-
-                        <SelectItem value="raw">
-                          Raw
-                        </SelectItem>
-
-                        <SelectItem value="html">
-                          HTML
-                        </SelectItem>
-
-                        <SelectItem value="javascript">
-                          JavaScript
-                        </SelectItem>
-
-                        <SelectItem value="graphql">
-                          GraphQL
-                        </SelectItem>
+                        <SelectItem value="none">none</SelectItem>
+                        <SelectItem value="json">JSON</SelectItem>
+                        <SelectItem value="raw">Raw</SelectItem>
+                        <SelectItem value="html">HTML</SelectItem>
+                        <SelectItem value="javascript">JavaScript</SelectItem>
+                        <SelectItem value="graphql">GraphQL</SelectItem>
                       </SelectContent>
                     </Select>
 
-                    {bodyType !==
-                      "none" && (
+                    {bodyType !== "none" && (
                       <>
-                        <Textarea
-                          value={body}
-                          onChange={(e) =>
-                            setBody(
-                              e.target
-                                .value
-                            )
-                          }
-                          className="min-h-[320px] font-mono"
-                          placeholder="Request body..."
-                        />
-
-                        {bodyType ===
-                          "graphql" && (
-                          <Textarea
-                            value={
-                              graphqlVariables
-                            }
-                            onChange={(e) =>
-                              setGraphqlVariables(
-                                e.target
-                                  .value
-                              )
-                            }
-                            className="min-h-[120px] font-mono"
-                            placeholder="GraphQL Variables (JSON)"
-                          />
+                        <Textarea value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[320px] font-mono" placeholder="Request body..." />
+                        {bodyType === "graphql" && (
+                          <Textarea value={graphqlVariables} onChange={(e) => setGraphqlVariables(e.target.value)} className="min-h-[120px] font-mono" placeholder="GraphQL Variables (JSON)" />
                         )}
                       </>
                     )}
-
-                    {NO_BODY_METHODS.includes(
-                      method
-                    ) &&
-                      bodyType !==
-                        "none" && (
-                        <p className="text-yellow-400 text-sm">
-                          ⚠️ Body is ignored
-                          for {method} requests.
-                        </p>
-                      )}
+                    {NO_BODY_METHODS.includes(method) && bodyType !== "none" && (
+                      <p className="text-yellow-400 text-sm">⚠️ Body is ignored for {method} requests.</p>
+                    )}
                   </TabsContent>
                 </Tabs>
               </CardContent>
             </Card>
           </div>
 
-          {/* RIGHT */}
-
+          {/* RIGHT SIDE - Analysis Console */}
           <div className="lg:col-span-2">
             <Card className="border-slate-700 bg-slate-950/90 h-full">
-
-              <CardHeader>
-                <CardTitle className="text-3xl font-semibold">
-                  Analysis Console
-                </CardTitle>
-              </CardHeader>
-
+              <CardHeader><CardTitle className="text-3xl font-semibold">Analysis Console</CardTitle></CardHeader>
               <CardContent className="p-8">
-
-                <Tabs
-                  value={activeTab}
-                  onValueChange={(v) =>
-                    setActiveTab(
-                      v as
-                        | "response"
-                        | "security"
-                    )
-                  }
-                >
-
+                <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "response" | "security")}>
                   <TabsList className="grid grid-cols-2 mb-8 bg-slate-900">
-                    <TabsTrigger value="response">
-                      API Response
-                    </TabsTrigger>
-
-                    <TabsTrigger value="security">
-                      Security Analysis
-                    </TabsTrigger>
+                    <TabsTrigger value="response">API Response</TabsTrigger>
+                    <TabsTrigger value="security">Security Analysis</TabsTrigger>
                   </TabsList>
 
-                  {/* RESPONSE */}
-
                   <TabsContent value="response">
-
                     {!apiResponse ? (
                       <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                         <Eye className="w-16 h-16 mb-5 opacity-40" />
-                        <p>
-                          Send request to view
-                          response
-                        </p>
+                        <p>Send request to view response</p>
                       </div>
                     ) : (
-                      <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
-                        {JSON.stringify(
-                          apiResponse,
-                          null,
-                          2
-                        )}
-                      </pre>
+                      <div>
+                        <Tabs value={responseSubTab} onValueChange={(v) => setResponseSubTab(v as any)}>
+                          <TabsList className="grid grid-cols-3 mb-4">
+                            <TabsTrigger value="body">Body</TabsTrigger>
+                            <TabsTrigger value="headers">Headers</TabsTrigger>
+                            <TabsTrigger value="raw">Raw</TabsTrigger>
+                          </TabsList>
+
+                          <TabsContent value="body">
+                            <Button variant="outline" size="sm" className="mb-3" onClick={() => copyToClipboard(JSON.stringify(apiResponse.body || apiResponse.rawText, null, 2), "Response Body")}>
+                              <Copy className="w-4 h-4 mr-2" /> Copy Body
+                            </Button>
+                            <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
+                              {displayResponseBody(apiResponse)}
+                            </pre>
+                          </TabsContent>
+
+                          <TabsContent value="headers">
+                            <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800">
+                              {JSON.stringify(apiResponse.headers, null, 2)}
+                            </pre>
+                          </TabsContent>
+
+                          <TabsContent value="raw">
+                            <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
+                              {apiResponse.rawText || "No raw content"}
+                            </pre>
+                          </TabsContent>
+                        </Tabs>
+                      </div>
                     )}
                   </TabsContent>
 
-                  {/* SECURITY */}
-
                   <TabsContent value="security">
-
                     {!securityResult ? (
                       <div className="flex flex-col items-center justify-center py-24 text-slate-500">
                         <ShieldCheck className="w-20 h-20 mb-6 opacity-40" />
-
-                        <p>
-                          Security findings
-                          will appear here
-                        </p>
+                        <p>Security findings will appear here</p>
                       </div>
                     ) : (
                       <div className="space-y-6">
-
                         <div className="flex justify-between items-center">
                           <div>
-                            <h3 className="text-3xl font-semibold">
-                              Security
-                              Findings
-                            </h3>
-
+                            <h3 className="text-3xl font-semibold">Security Findings</h3>
                             <p className="text-slate-400">
-                              {
-                                securityResult
-                                  .findings
-                                  ?.length
-                              }{" "}
-                              issues • Risk
-                              Score:{" "}
-                              <span className="text-orange-400 font-semibold">
-                                {
-                                  securityResult.overall_risk_score
-                                }
-                                %
-                              </span>
+                              {securityResult.findings?.length ?? 0} issues • Risk Score: <span className="text-orange-400 font-semibold">{securityResult.overall_risk_score}%</span>
                             </p>
                           </div>
-
-                          <Button
-                            onClick={
-                              downloadReport
-                            }
-                            className="bg-gradient-to-r from-purple-600 to-violet-600"
-                          >
-                            <Download className="mr-2 h-4 w-4" />
-                            Export Report
+                          <Button onClick={downloadReport} className="bg-gradient-to-r from-purple-600 to-violet-600">
+                            <Download className="mr-2 h-4 w-4" /> Export Report
                           </Button>
                         </div>
 
-                        {sortedFindings.length >
-                        0 ? (
+                        {sortedFindings.length > 0 ? (
                           <div className="space-y-6">
-
-                            {sortedFindings.map(
-                              (
-                                f,
-                                i
-                              ) => (
-                                <motion.div
-                                  key={i}
-                                  initial={{
-                                    opacity: 0,
-                                    y: 30,
-                                  }}
-                                  animate={{
-                                    opacity: 1,
-                                    y: 0,
-                                  }}
-                                  transition={{
-                                    delay:
-                                      i *
-                                      0.05,
-                                  }}
-                                  className={`p-7 rounded-3xl border ${severityBorder[f.severity]} bg-slate-900/80`}
-                                >
-
-                                  <div className="flex justify-between items-start gap-4">
-
-                                    <div className="flex-1">
-
-                                      <div className="flex items-center gap-4">
-                                        <AlertTriangle className="w-7 h-7 text-orange-400 shrink-0" />
-
-                                        <h4 className="text-2xl font-semibold">
-                                          {
-                                            f.issue
-                                          }
-                                        </h4>
-                                      </div>
-
-                                      {f.category && (
-                                        <p className="text-purple-400 mt-2 text-sm">
-                                          Category:{" "}
-                                          {
-                                            f.category
-                                          }
-                                        </p>
-                                      )}
-
-                                      <p className="mt-4 text-slate-300 leading-relaxed">
-                                        {
-                                          f.description
-                                        }
-                                      </p>
+                            {sortedFindings.map((f, i) => (
+                              <motion.div key={i} initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                                className={`p-7 rounded-3xl border ${severityBorder[f.severity]} bg-slate-900/80`}>
+                                <div className="flex justify-between items-start gap-4">
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-4">
+                                      <AlertTriangle className="w-7 h-7 text-orange-400 shrink-0" />
+                                      <h4 className="text-2xl font-semibold">{f.issue}</h4>
                                     </div>
-
-                                    <Badge
-                                      className={`text-sm px-5 py-2 shrink-0 ${severityColors[f.severity]}`}
-                                    >
-                                      {
-                                        f.severity
-                                      }
-                                    </Badge>
+                                    {f.category && <p className="text-purple-400 mt-2 text-sm">Category: {f.category}</p>}
+                                    <p className="mt-4 text-slate-300 leading-relaxed">{f.description}</p>
                                   </div>
-                                </motion.div>
-                              )
-                            )}
+                                  <Badge className={`text-sm px-5 py-2 shrink-0 ${severityColors[f.severity]}`}>{f.severity}</Badge>
+                                </div>
+                              </motion.div>
+                            ))}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center py-24 text-emerald-400">
                             <CheckCircle2 className="w-24 h-24 mx-auto mb-6" />
-
-                            <p className="text-3xl font-semibold">
-                              No Security
-                              Issues Found
-                            </p>
+                            <p className="text-3xl font-semibold">No Security Issues Detected</p>
                           </div>
                         )}
                       </div>
@@ -1235,6 +688,15 @@ export default function Analyzer() {
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {toast && (
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}
+            className={`fixed bottom-6 right-6 px-6 py-3 rounded-xl shadow-xl ${toast.type === "error" ? "bg-red-600" : "bg-emerald-600"} text-white z-50`}>
+            {toast.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

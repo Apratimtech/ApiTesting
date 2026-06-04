@@ -16,7 +16,7 @@ load_dotenv()
 # =========================================================
 # postgresql://postgres:password@localhost/trustedge
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL","postgresql://neondb_owner:npg_9DUt1mAoVPEN@ep-holy-king-aokcy0os-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 
 # =========================================================
 # SQLALCHEMY ENGINE
