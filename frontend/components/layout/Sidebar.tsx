@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   Zap, Home, History, Settings, Plus, Trash2,
-  ChevronDown, ChevronRight, FolderOpen, FileText
+  ChevronDown, ChevronRight, FolderOpen, FileText, Save, CheckCircle, AlertCircle
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -23,30 +23,22 @@ type RequestItem = {
   method: string;
   url: string;
   type: string;
-  // Common fields
-  authType?: "no-auth" | "bearer" | "basic" | "api-key" | "jwt";
-  bearer?: string;
-  basicUser?: string;
-  basicPass?: string;
-  apiKey?: string;
-  headers?: Array<{ key: string; value: string }>;
+  headers?: Record<string, string> | Array<{ key: string; value: string }>;
   bodyType?: BodyType;
   body?: string;
-  graphqlVariables?: string;
-  // MQTT specific
   topic?: string;
   message?: string;
   qos?: number;
-  // gRPC specific
   serverUrl?: string;
   serviceName?: string;
   methodName?: string;
   payload?: string;
-  metadata?: Array<{ key: string; value: string }>;
+  brokerUrl?: string;
+  clientId?: string;
 };
 
 type Collection = {
-  id: number;
+  id: string;
   name: string;
   requests: RequestItem[];
   collections: Collection[];
@@ -54,7 +46,7 @@ type Collection = {
 };
 
 const PROTOCOLS = [
-  { name: "HTTP", icon: "🌐", color: "#60a5fa", defaultMethod: "GET", route: "/analyzer/http" },
+  { name: "HTTP", icon: "🌐", color: "#60a5fa", defaultMethod: "GET", route: "/analyzer" },
   { name: "GraphQL", icon: "⚡", color: "#f472b6", defaultMethod: "POST", route: "/analyzer/graphql" },
   { name: "WebSocket", icon: "🔌", color: "#34d399", defaultMethod: "GET", route: "/analyzer/websocket" },
   { name: "gRPC", icon: "🔄", color: "#22d3ee", defaultMethod: "POST", route: "/analyzer/grpc" },
@@ -64,72 +56,172 @@ const PROTOCOLS = [
   { name: "MCP", icon: "🔧", color: "#fbbf24", defaultMethod: "POST", route: "/analyzer/mcp" },
 ];
 
+const API_BASE = "http://127.0.0.1:8000/api/v1";
+
 export default function Sidebar() {
   const router = useRouter();
 
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [editingId, setEditingId] = useState<string | number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [showNewModal, setShowNewModal] = useState(false);
-  const [currentParentId, setCurrentParentId] = useState<number | null>(null);
+  const [currentParentId, setCurrentParentId] = useState<string | null>(null);
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [newName, setNewName] = useState("");
   const [selectedProtocol, setSelectedProtocol] = useState("HTTP");
+
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: number | string; isFolder: boolean; name: string } | null>(null);
-  const [deletingId, setDeletingId] = useState<string | number | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; isFolder: boolean; name: string } | null>(null);
+  const [saveTarget, setSaveTarget] = useState<{ id: string; isFolder: boolean; name: string } | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
-  // Load collections from localStorage
+  const fetchCollections = async (): Promise<any> => {
+    const res = await fetch(`${API_BASE}/collections/`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) throw new Error("Failed to fetch collections");
+    return await res.json();
+  };
+
+  const loadCollections = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchCollections();
+      const backendData = res.data || res || [];
+      const mapped: Collection[] = backendData.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        requests: c.requests || [],
+        collections: c.collections || [],
+        isOpen: true,
+      }));
+      setCollections(mapped);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Failed to load collections");
+      setCollections([{ id: "1", name: "My Collection", requests: [], collections: [], isOpen: true }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("trustedge_collections");
-      if (saved) {
-        setCollections(JSON.parse(saved));
-      } else {
-        const defaults: Collection[] = [{
-          id: 1,
-          name: "My Collection",
-          requests: [],
-          collections: [],
-          isOpen: true
-        }];
-        setCollections(defaults);
-        localStorage.setItem("trustedge_collections", JSON.stringify(defaults));
+    loadCollections();
+  }, []);
+
+  const createNewItem = async () => {
+    const trimmedName = newName.trim();
+    if (!trimmedName) return;
+
+    if (isCreatingFolder) {
+      try {
+        await fetch(`${API_BASE}/collections/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: trimmedName, parentId: currentParentId }),
+        });
+        await loadCollections();
+      } catch (error: any) {
+        alert("Failed to create folder: " + error.message);
       }
-    } catch (error) {
-      console.error("Failed to load collections:", error);
-      const defaults: Collection[] = [{
-        id: 1,
-        name: "My Collection",
-        requests: [],
-        collections: [],
-        isOpen: true
-      }];
-      setCollections(defaults);
-      localStorage.setItem("trustedge_collections", JSON.stringify(defaults));
-    }
-  }, []);
+    } else {
+      if (!currentParentId) {
+        alert("Please select a folder first to create the request.");
+        return;
+      }
 
-  const saveCollections = useCallback((updated: Collection[]) => {
+      const protocol = PROTOCOLS.find(p => p.name === selectedProtocol)!;
+
+      // Convert headers array to object (Fix for 422 error)
+      const headersObj = { "Content-Type": "application/json" };
+
+      const payload = {
+        name: trimmedName,
+        type: selectedProtocol,
+        method: protocol.defaultMethod,
+        url: selectedProtocol === "HTTP" ? "https://httpbin.org/get" : "",
+        headers: headersObj,                    // ← Fixed
+        bodyType: "json",
+        body: `{\n  "username": "admin",\n  "password": "123456"\n}`,
+        ...(selectedProtocol === "gRPC" && {
+          serverUrl: "grpc://localhost:50051",
+          serviceName: "user.UserService",
+          methodName: "CreateUser",
+          payload: `{\n  "name": "John Doe",\n  "email": "john@example.com"\n}`
+        }),
+        ...(selectedProtocol === "MQTT" && {
+          topic: "test/topic",
+          message: "Hello from Trust_Edge",
+          qos: 1,
+          brokerUrl: "ws://localhost:9001",
+          clientId: `trust_edge_${Date.now()}`
+        }),
+      };
+
+      try {
+        const res = await fetch(`${API_BASE}/collections/${currentParentId}/request`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText);
+        }
+
+        const created = await res.json();
+        localStorage.setItem("last_selected_request", JSON.stringify(created.data || created));
+        await loadCollections();
+      } catch (error: any) {
+        console.error(error);
+        alert("Failed to create request: " + error.message);
+        return;
+      }
+    }
+
+    setShowNewModal(false);
+    setNewName("");
+  };
+
+  const handleRequestClick = useCallback((req: RequestItem) => {
+    console.log("Clicked Request:", req); // Debug
     try {
-      setCollections(updated);
-      localStorage.setItem("trustedge_collections", JSON.stringify(updated));
+      localStorage.setItem("last_selected_request", JSON.stringify(req));
+      const protocol = PROTOCOLS.find(p => p.name === req.type);
+      const route = protocol?.route || "/analyzer";
+      router.push(`${route}?request=${req.id}&t=${Date.now()}`);
     } catch (error) {
-      console.error("Failed to save collections:", error);
+      console.error(error);
+      router.push("/analyzer");
     }
+  }, [router]);
+
+  const toggleFolder = useCallback((id: string) => {
+    setCollections(prev =>
+      prev.map(col => {
+        if (col.id === id) return { ...col, isOpen: !col.isOpen };
+        return { ...col, collections: updateIsOpen(col.collections || [], id) };
+      })
+    );
   }, []);
 
-  const toggleFolder = useCallback((id: number) => {
-    const update = (cols: Collection[]): Collection[] =>
-      cols.map(col =>
-        col.id === id
-          ? { ...col, isOpen: !col.isOpen }
-          : { ...col, collections: update(col.collections || []) }
-      );
-    saveCollections(update(collections));
-  }, [collections, saveCollections]);
+  const updateIsOpen = (cols: Collection[], targetId: string): Collection[] => {
+    return cols.map(col => ({
+      ...col,
+      isOpen: col.id === targetId ? !col.isOpen : col.isOpen,
+      collections: updateIsOpen(col.collections || [], targetId)
+    }));
+  };
 
-  const openNewModal = useCallback((parentId: number | null, isFolder: boolean) => {
+  const openNewModal = useCallback((parentId: string | null, isFolder: boolean) => {
     setCurrentParentId(parentId);
     setIsCreatingFolder(isFolder);
     setNewName("");
@@ -137,109 +229,7 @@ export default function Sidebar() {
     setShowNewModal(true);
   }, []);
 
-  const createNewItem = useCallback(() => {
-    const trimmedName = newName.trim();
-    if (!trimmedName) return;
-
-    if (isCreatingFolder) {
-      const newFolder: Collection = {
-        id: Date.now(),
-        name: trimmedName,
-        requests: [],
-        collections: [],
-        isOpen: true
-      };
-
-      const updateFn = (cols: Collection[]): Collection[] =>
-        cols.map(col =>
-          col.id === currentParentId
-            ? { ...col, collections: [...(col.collections || []), newFolder] }
-            : { ...col, collections: updateFn(col.collections || []) }
-        );
-
-      saveCollections(currentParentId === null ? [...collections, newFolder] : updateFn(collections));
-    } else {
-      const protocol = PROTOCOLS.find(p => p.name === selectedProtocol)!;
-
-      const newReq: RequestItem = {
-        id: Date.now().toString(),
-        name: trimmedName,
-        method: protocol.defaultMethod,
-        url: selectedProtocol === "HTTP" ? "https://httpbin.org/get" : "",
-        type: selectedProtocol,
-        // gRPC defaults
-        serverUrl: selectedProtocol === "gRPC" ? "grpc://localhost:50051" : undefined,
-        serviceName: selectedProtocol === "gRPC" ? "user.UserService" : undefined,
-        methodName: selectedProtocol === "gRPC" ? "CreateUser" : undefined,
-        payload: selectedProtocol === "gRPC" ? `{\n  "name": "John Doe",\n  "email": "john@example.com"\n}` : undefined,
-        // MQTT defaults
-        topic: selectedProtocol === "MQTT" ? "test/topic" : undefined,
-        message: selectedProtocol === "MQTT" ? "Hello from Trust_Edge" : undefined,
-        qos: selectedProtocol === "MQTT" ? 1 : undefined,
-        // Common defaults
-        headers: [{ key: "Content-Type", value: "application/json" }],
-        bodyType: "json",
-        body: `{\n  "username": "admin",\n  "password": "123456"\n}`,
-      };
-
-      const updateFn = (cols: Collection[]): Collection[] =>
-        cols.map(col =>
-          col.id === currentParentId
-            ? { ...col, requests: [...col.requests, newReq] }
-            : { ...col, collections: updateFn(col.collections || []) }
-        );
-
-      saveCollections(updateFn(collections));
-    }
-
-    setShowNewModal(false);
-    setNewName("");
-  }, [newName, isCreatingFolder, currentParentId, selectedProtocol, collections, saveCollections]);
-
-  // Fixed handleRequestClick - Supports all protocols
-  const handleRequestClick = useCallback((req: RequestItem) => {
-    try {
-      localStorage.setItem("last_selected_request", JSON.stringify(req));
-
-      let route = "/analyzer";
-
-      switch (req.type) {
-        case "HTTP":
-          route = "/analyzer/http";
-          break;
-        case "MQTT":
-          route = "/analyzer/mqtt";
-          break;
-        case "gRPC":
-          route = "/analyzer/grpc";
-          break;
-        case "WebSocket":
-          route = "/analyzer/websocket";
-          break;
-        case "Socket.IO":
-          route = "/analyzer/socketio";
-          break;
-        case "GraphQL":
-          route = "/analyzer/graphql";
-          break;
-        case "AI":
-          route = "/analyzer/ai";
-          break;
-        case "MCP":
-          route = "/analyzer/mcp";
-          break;
-        default:
-          route = "/analyzer";
-      }
-
-      router.push(route);
-    } catch (error) {
-      console.error("Failed to open request:", error);
-      router.push("/analyzer");
-    }
-  }, [router]);
-
-  const startEditing = useCallback((id: string | number, name: string, e: React.MouseEvent) => {
+  const startEditing = useCallback((id: string, name: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setEditingId(id);
     setEditingName(name);
@@ -252,116 +242,112 @@ export default function Sidebar() {
       return;
     }
     const trimmed = editingName.trim();
-    const update = (cols: Collection[]): Collection[] =>
-      cols.map(col => ({
+    setCollections(prev =>
+      prev.map(col => ({
         ...(col.id === editingId ? { ...col, name: trimmed } : col),
-        requests: col.requests.map(req =>
-          req.id === editingId ? { ...req, name: trimmed } : req
-        ),
-        collections: update(col.collections || [])
-      }));
-
-    saveCollections(update(collections));
+        requests: col.requests.map(req => req.id === editingId ? { ...req, name: trimmed } : req),
+        collections: updateCollectionName(col.collections || [], editingId, trimmed)
+      }))
+    );
     setEditingId(null);
     setEditingName("");
-  }, [editingId, editingName, collections, saveCollections]);
+  }, [editingId, editingName]);
 
-  const openDeleteModal = useCallback((id: number | string, isFolder: boolean, name: string, e: React.MouseEvent) => {
+  const updateCollectionName = (cols: Collection[], targetId: string, newName: string): Collection[] => {
+    return cols.map(col => ({
+      ...(col.id === targetId ? { ...col, name: newName } : col),
+      requests: col.requests.map(req => req.id === targetId ? { ...req, name: newName } : req),
+      collections: updateCollectionName(col.collections || [], targetId, newName)
+    }));
+  };
+
+  const openDeleteModal = useCallback((id: string, isFolder: boolean, name: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setDeleteTarget({ id, isFolder, name });
     setShowDeleteModal(true);
   }, []);
 
-  const confirmDelete = useCallback(() => {
-    if (!deleteTarget) return;
+  const openSaveModal = useCallback((id: string, isFolder: boolean, name: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSaveTarget({ id, isFolder, name });
+    setShowSaveModal(true);
+  }, []);
+
+  const confirmSave = useCallback(() => {
+    setShowSaveModal(false);
+    setSaveTarget(null);
+  }, []);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || isDeleting) return;
     setDeletingId(deleteTarget.id);
-    setTimeout(() => {
-      const update = (cols: Collection[]): Collection[] => {
-        if (deleteTarget.isFolder) {
-          return cols
-            .filter(c => c.id !== deleteTarget.id)
-            .map(c => ({ ...c, collections: update(c.collections || []) }));
-        }
-        return cols.map(c => ({
-          ...c,
-          requests: c.requests.filter(r => r.id !== deleteTarget.id),
-          collections: update(c.collections || [])
-        }));
-      };
-      saveCollections(update(collections));
+    try {
+      if (deleteTarget.isFolder) {
+        await fetch(`${API_BASE}/collections/${deleteTarget.id}`, { method: "DELETE" });
+      } else {
+        await fetch(`${API_BASE}/collections/request/${deleteTarget.id}`, { method: "DELETE" });
+      }
+      await loadCollections();
+    } catch (error: any) {
+      alert("Failed to delete: " + error.message);
+    } finally {
       setDeletingId(null);
       setShowDeleteModal(false);
       setDeleteTarget(null);
-    }, 400);
-  }, [deleteTarget, collections, saveCollections]);
+    }
+  };
 
   const renderCollection = useCallback((col: Collection, level = 0): JSX.Element => {
     const pl = 16 + level * 22;
-    const isDeleting = deletingId === col.id;
+    const isDeletingItem = deletingId === col.id;
 
     return (
-      <div key={col.id} className={`mb-1 transition-all duration-500 ${isDeleting ? 'opacity-0 scale-75 -translate-x-12' : ''}`}>
-        <div
-          className="te-folder-row group flex items-center justify-between"
-          style={{ paddingLeft: `${pl}px` }}
-          onClick={() => toggleFolder(col.id)}
-        >
+      <div key={col.id} className={`mb-1 transition-all duration-500 ${isDeletingItem ? 'opacity-0 scale-75 -translate-x-12' : ''}`}>
+        <div className="te-folder-row group flex items-center justify-between" style={{ paddingLeft: `${pl}px` }} onClick={() => toggleFolder(col.id)}>
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <span className="te-chevron">
-              {col.isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            </span>
+            <span className="te-chevron">{col.isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
             <FolderOpen size={19} className="te-folder-icon flex-shrink-0" />
             {editingId === col.id ? (
               <input autoFocus value={editingName} onChange={e => setEditingName(e.target.value)} onBlur={saveEdit} onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") { setEditingId(null); setEditingName(""); } }} className="te-inline-input flex-1" />
             ) : (
-              <span className="te-folder-name truncate" onDoubleClick={e => startEditing(col.id, col.name, e)}>
-                {col.name}
-              </span>
+              <span className="te-folder-name truncate" onDoubleClick={e => startEditing(col.id, col.name, e)}>{col.name}</span>
             )}
           </div>
 
           <div className="te-row-actions flex items-center gap-1 opacity-0 group-hover:opacity-100">
-            <button className="te-act-btn" onClick={e => { e.stopPropagation(); openNewModal(col.id, false); }}><Plus size={16} /></button>
-            <button className="te-act-btn" onClick={e => { e.stopPropagation(); openNewModal(col.id, true); }}><FolderOpen size={16} /></button>
-            <button className="te-act-btn te-red" onClick={e => openDeleteModal(col.id, true, col.name, e)}><Trash2 size={16} /></button>
+            <button className="te-act-btn" onClick={e => { e.stopPropagation(); openNewModal(col.id, false); }} title="New Request"><Plus size={16} /></button>
+            <button className="te-act-btn" onClick={e => { e.stopPropagation(); openNewModal(col.id, true); }} title="New Folder"><FolderOpen size={16} /></button>
+            <button className="te-act-btn" onClick={e => openSaveModal(col.id, true, col.name, e)} title="Save"><Save size={16} /></button>
+            <button className="te-act-btn te-red" onClick={e => openDeleteModal(col.id, true, col.name, e)} title="Delete" disabled={isDeleting}><Trash2 size={16} /></button>
           </div>
         </div>
 
         {col.isOpen && (
           <div>
-            {col.requests.map(req => {
-              const isReqDeleting = deletingId === req.id;
-              return (
-                <div
-                  key={req.id}
-                  className={`te-request-row group flex items-center ${isReqDeleting ? 'opacity-0 scale-75 -translate-x-12' : ''}`}
-                  style={{ paddingLeft: `${pl + 32}px` }}
-                  onClick={() => !isReqDeleting && handleRequestClick(req)}
-                >
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <span className="te-method-badge">{req.method}</span>
-                    <span className="te-req-type-dot" style={{ backgroundColor: PROTOCOLS.find(p => p.name === req.type)?.color || '#60a5fa' }} />
-                    <FileText size={17} className="text-violet-400 flex-shrink-0" />
-                    {editingId === req.id ? (
-                      <input autoFocus value={editingName} onChange={e => setEditingName(e.target.value)} onBlur={saveEdit} onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") { setEditingId(null); setEditingName(""); } }} className="te-inline-input flex-1" />
-                    ) : (
-                      <span className="te-req-name truncate" onDoubleClick={e => startEditing(req.id, req.name, e)}>
-                        {req.name}
-                      </span>
-                    )}
-                  </div>
-                  <button className="te-act-btn te-red opacity-0 group-hover:opacity-100" onClick={e => openDeleteModal(req.id, false, req.name, e)}>
-                    <Trash2 size={16} />
-                  </button>
+            {col.requests.map(req => (
+              <div key={req.id} className={`te-request-row group flex items-center ${deletingId === req.id ? 'opacity-0 scale-75 -translate-x-12' : ''}`} style={{ paddingLeft: `${pl + 32}px` }} onClick={() => handleRequestClick(req)}>
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <span className="te-method-badge">{req.method}</span>
+                  <span className="te-req-type-dot" style={{ backgroundColor: PROTOCOLS.find(p => p.name === req.type)?.color || '#60a5fa' }} />
+                  <FileText size={17} className="text-violet-400 flex-shrink-0" />
+                  {editingId === req.id ? (
+                    <input autoFocus value={editingName} onChange={e => setEditingName(e.target.value)} onBlur={saveEdit} onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") { setEditingId(null); setEditingName(""); } }} className="te-inline-input flex-1" />
+                  ) : (
+                    <span className="te-req-name truncate" onDoubleClick={e => startEditing(req.id, req.name, e)}>{req.name}</span>
+                  )}
                 </div>
-              );
-            })}
+                <div className="te-row-actions flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                  <button className="te-act-btn" onClick={e => openSaveModal(req.id, false, req.name, e)} title="Save"><Save size={16} /></button>
+                  <button className="te-act-btn te-red" onClick={e => openDeleteModal(req.id, false, req.name, e)} title="Delete" disabled={isDeleting}><Trash2 size={16} /></button>
+                </div>
+              </div>
+            ))}
             {(col.collections || []).map(sub => renderCollection(sub, level + 1))}
           </div>
         )}
       </div>
     );
-  }, [editingId, editingName, deletingId, toggleFolder, openNewModal, openDeleteModal, startEditing, saveEdit, handleRequestClick]);
+  }, [editingId, editingName, deletingId, toggleFolder, openNewModal, openDeleteModal, openSaveModal, startEditing, saveEdit, handleRequestClick, isDeleting]);
 
   return (
     <>
@@ -372,6 +358,7 @@ export default function Sidebar() {
         .te-folder-row:hover, .te-request-row:hover { background: rgba(167,139,246,0.15); transform: translateX(8px) scale(1.03); }
         .te-act-btn { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 7px; color: #94a3b8; transition: all 0.2s; }
         .te-act-btn:hover { color: white; background: rgba(167,139,246,0.3); transform: scale(1.25); }
+        .te-act-btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .te-red:hover { color: #f87171 !important; }
         .te-folder-icon { color: #c4b5fd; }
         .te-folder-name, .te-req-name { color: #e0e7ff; font-weight: 500; cursor: pointer; }
@@ -382,6 +369,7 @@ export default function Sidebar() {
       `}</style>
 
       <div className="te-sidebar">
+        {/* Header */}
         <div className="px-6 py-6 border-b border-white/10 flex items-center gap-3 cursor-pointer hover:opacity-90 transition" onClick={() => router.push('/dashboard')}>
           <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-600 flex items-center justify-center shadow-xl shadow-purple-500/50">
             <Zap size={28} color="#fff" strokeWidth={2.8} />
@@ -394,6 +382,7 @@ export default function Sidebar() {
           </div>
         </div>
 
+        {/* Navigation */}
         <div className="px-3 pt-4 space-y-1">
           <Link href="/dashboard" className="flex items-center gap-3 px-4 py-3 text-zinc-400 hover:text-white hover:bg-white/5 rounded-xl transition-all text-[15px]">
             <Home size={18} /> Dashboard
@@ -406,17 +395,30 @@ export default function Sidebar() {
           </Link>
         </div>
 
+        {/* Collections Header */}
         <div className="px-6 mt-7 mb-3 flex justify-between items-center">
           <span className="uppercase text-xs tracking-widest font-mono text-zinc-400">Collections</span>
-          <button onClick={() => openNewModal(null, true)} className="text-violet-400 hover:bg-white/10 p-2 rounded-xl transition-all">
+          <button onClick={() => openNewModal(null, true)} className="text-violet-400 hover:bg-white/10 p-2 rounded-xl transition-all" disabled={loading}>
             <Plus size={20} />
           </button>
         </div>
 
+        {/* Collections List */}
         <div className="flex-1 overflow-y-auto px-3 py-1">
-          {collections.map(col => renderCollection(col))}
+          {loading ? (
+            <div className="text-zinc-400 text-center py-8">Loading collections...</div>
+          ) : error ? (
+            <div className="text-red-400 text-center py-8 flex flex-col items-center gap-2">
+              <AlertCircle size={24} />
+              <p>{error}</p>
+              <button onClick={loadCollections} className="text-violet-400 underline">Retry</button>
+            </div>
+          ) : (
+            collections.map(col => renderCollection(col))
+          )}
         </div>
 
+        {/* Bottom Settings */}
         <div className="p-4 border-t border-white/10">
           <Link href="/settings" className="flex items-center gap-3 px-4 py-3 text-zinc-400 hover:text-white hover:bg-white/5 rounded-xl transition-all text-[15px]">
             <Settings size={18} /> Settings
@@ -433,26 +435,22 @@ export default function Sidebar() {
               New {isCreatingFolder ? "Folder" : "Request"}
             </div>
 
-            <input 
-              autoFocus 
-              className="w-full bg-zinc-900 border border-white/10 rounded-2xl px-5 py-4 text-white placeholder-zinc-500 focus:border-violet-500 outline-none mb-6" 
-              placeholder={isCreatingFolder ? "Folder name..." : "Request name..."} 
-              value={newName} 
-              onChange={e => setNewName(e.target.value)} 
-              onKeyDown={e => { 
-                if (e.key === "Enter" && newName.trim()) createNewItem(); 
-                if (e.key === "Escape") setShowNewModal(false); 
-              }} 
+            <input
+              autoFocus
+              className="w-full bg-zinc-900 border border-white/10 rounded-2xl px-5 py-4 text-white placeholder-zinc-500 focus:border-violet-500 outline-none mb-6"
+              placeholder={isCreatingFolder ? "Folder name..." : "Request name..."}
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && newName.trim()) createNewItem();
+                if (e.key === "Escape") setShowNewModal(false);
+              }}
             />
 
             {!isCreatingFolder && (
               <div className="grid grid-cols-2 gap-3 mb-6">
                 {PROTOCOLS.map(p => (
-                  <button 
-                    key={p.name} 
-                    onClick={() => setSelectedProtocol(p.name)} 
-                    className={`p-4 rounded-2xl border text-left transition-all group ${selectedProtocol === p.name ? 'border-violet-500 bg-violet-500/10' : 'border-white/10 hover:border-white/30'}`}
-                  >
+                  <button key={p.name} onClick={() => setSelectedProtocol(p.name)} className={`p-4 rounded-2xl border text-left transition-all group ${selectedProtocol === p.name ? 'border-violet-500 bg-violet-500/10' : 'border-white/10 hover:border-white/30'}`}>
                     <span className="text-2xl mb-2 block">{p.icon}</span>
                     <div className="font-medium text-white">{p.name}</div>
                   </button>
@@ -468,6 +466,21 @@ export default function Sidebar() {
         </div>
       )}
 
+      {/* Save Modal */}
+      {showSaveModal && saveTarget && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
+          <div className="bg-zinc-950 border border-emerald-500/30 rounded-3xl w-full max-w-[400px] p-8 text-center shadow-2xl">
+            <CheckCircle size={48} className="mx-auto text-emerald-500 mb-4" />
+            <h3 className="text-xl font-semibold mb-2">Save Changes?</h3>
+            <p className="text-zinc-400 mb-6">Do you want to save "<span className="text-white font-medium">{saveTarget.name}</span>"?</p>
+            <div className="flex gap-3">
+              <button onClick={() => { setShowSaveModal(false); setSaveTarget(null); }} className="flex-1 py-3.5 rounded-2xl bg-zinc-900 hover:bg-zinc-800">Cancel</button>
+              <button onClick={confirmSave} className="flex-1 py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700">Yes, Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Modal */}
       {showDeleteModal && deleteTarget && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-xl z-[100] flex items-center justify-center p-4">
@@ -477,7 +490,9 @@ export default function Sidebar() {
             <p className="text-zinc-400 mb-6">"{deleteTarget.name}"</p>
             <div className="flex gap-3">
               <button onClick={() => setShowDeleteModal(false)} className="flex-1 py-3.5 rounded-2xl bg-zinc-900 hover:bg-zinc-800">Cancel</button>
-              <button onClick={confirmDelete} className="flex-1 py-3.5 rounded-2xl bg-red-600 hover:bg-red-700">Yes, Delete</button>
+              <button onClick={confirmDelete} disabled={isDeleting} className="flex-1 py-3.5 rounded-2xl bg-red-600 hover:bg-red-700 disabled:opacity-50">
+                {isDeleting ? "Deleting..." : "Yes, Delete"}
+              </button>
             </div>
           </div>
         </div>

@@ -1,25 +1,20 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from datetime import datetime
-
 from app.api.v1.endpoints import (
     request,
     analyze,
     collections,
     history
 )
-
 from app.mqtt.router import (
     router as mqtt_router
 )
 
 # =========================================================
-# 🔹 MAIN API ROUTER
+# 🔹 MAIN API ROUTER - FIXED (No double prefix)
 # =========================================================
-api_router = APIRouter(
-    prefix="/api/v1"
-)
-
+api_router = APIRouter()   # ← NO prefix here (fixed)
 
 # =========================================================
 # 🔹 HEALTH CHECK ENDPOINT
@@ -29,7 +24,6 @@ api_router = APIRouter(
     tags=["Health"]
 )
 async def health_check():
-
     return JSONResponse(
         status_code=200,
         content={
@@ -41,7 +35,6 @@ async def health_check():
         }
     )
 
-
 # =========================================================
 # 🔹 REQUEST ROUTER
 # =========================================================
@@ -50,7 +43,6 @@ api_router.include_router(
     prefix="/request",
     tags=["Request"]
 )
-
 
 # =========================================================
 # 🔹 ANALYZER ROUTER
@@ -61,7 +53,6 @@ api_router.include_router(
     tags=["Analyzer"]
 )
 
-
 # =========================================================
 # 🔹 COLLECTION ROUTER
 # =========================================================
@@ -70,7 +61,6 @@ api_router.include_router(
     prefix="/collections",
     tags=["Collections"]
 )
-
 
 # =========================================================
 # 🔹 HISTORY ROUTER
@@ -81,10 +71,10 @@ api_router.include_router(
     tags=["History"]
 )
 
-
 # =========================================================
 # 🔹 MQTT ROUTER
 # =========================================================
 api_router.include_router(
     mqtt_router
 )
+

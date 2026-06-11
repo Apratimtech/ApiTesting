@@ -2,14 +2,11 @@
 # app/grpc_proto/grpc_server.py
 # TRUST_EDGE ENTERPRISE gRPC SERVER
 # =========================================================
-
 import os
 import asyncio
 import logging
 from concurrent import futures
-
 import grpc
-
 from grpc_reflection.v1alpha import reflection
 
 # =========================================================
@@ -45,69 +42,33 @@ logging.basicConfig(
         "%(message)s"
     ),
 )
-
 logger = logging.getLogger("grpc_server")
 
 # =========================================================
 # ENVIRONMENT CONFIG
 # =========================================================
-GRPC_HOST = os.getenv(
-    "GRPC_HOST",
-    "[::]:50051"
-)
-
-ENABLE_TLS = os.getenv(
-    "GRPC_ENABLE_TLS",
-    "true"
-).lower() == "true"
-
-ENABLE_REFLECTION = os.getenv(
-    "GRPC_ENABLE_REFLECTION",
-    "true"
-).lower() == "true"
-
-MAX_WORKERS = int(
-    os.getenv(
-        "GRPC_MAX_WORKERS",
-        20
-    )
-)
-
+GRPC_HOST = os.getenv("GRPC_HOST", "[::]:50051")
+ENABLE_TLS = os.getenv("GRPC_ENABLE_TLS", "false").lower() == "true"
+ENABLE_REFLECTION = os.getenv("GRPC_ENABLE_REFLECTION", "true").lower() == "true"
+MAX_WORKERS = int(os.getenv("GRPC_MAX_WORKERS", 20))
 MAX_MESSAGE_SIZE = 50 * 1024 * 1024
 
-CERT_PATH = os.getenv(
-    "GRPC_CERT_PATH",
-    "certs/cert.pem"
-)
-
-KEY_PATH = os.getenv(
-    "GRPC_KEY_PATH",
-    "certs/key.pem"
-)
+CERT_PATH = os.getenv("GRPC_CERT_PATH", "certs/cert.pem")
+KEY_PATH = os.getenv("GRPC_KEY_PATH", "certs/key.pem")
 
 # =========================================================
 # KEEPALIVE + HARDENING
 # =========================================================
 KEEPALIVE_OPTIONS = [
-
     ("grpc.keepalive_time_ms", 30000),
-
     ("grpc.keepalive_timeout_ms", 10000),
-
     ("grpc.keepalive_permit_without_calls", True),
-
     ("grpc.http2.max_pings_without_data", 0),
-
     ("grpc.http2.min_time_between_pings_ms", 10000),
-
     ("grpc.http2.min_ping_interval_without_data_ms", 5000),
-
     ("grpc.max_send_message_length", MAX_MESSAGE_SIZE),
-
     ("grpc.max_receive_message_length", MAX_MESSAGE_SIZE),
-
     ("grpc.enable_retries", 1),
-
     ("grpc.so_reuseport", 1),
 ]
 
@@ -115,257 +76,126 @@ KEEPALIVE_OPTIONS = [
 # TLS CERTIFICATE LOADER
 # =========================================================
 def load_tls_credentials():
-
-    if not os.path.exists(CERT_PATH):
-
-        raise FileNotFoundError(
-            f"Missing TLS certificate: "
-            f"{CERT_PATH}"
-        )
-
-    if not os.path.exists(KEY_PATH):
-
-        raise FileNotFoundError(
-            f"Missing TLS private key: "
-            f"{KEY_PATH}"
-        )
-
-    with open(KEY_PATH, "rb") as key_file:
-        private_key = key_file.read()
-
-    with open(CERT_PATH, "rb") as cert_file:
-        certificate_chain = cert_file.read()
-
-    logger.info(
-        "TLS certificates loaded successfully"
-    )
-
-    logger.info(
-        f"Certificate path: {CERT_PATH}"
-    )
-
-    return grpc.ssl_server_credentials(
-        [
-            (
-                private_key,
-                certificate_chain,
-            )
-        ]
-    )
+    if ENABLE_TLS:
+        try:
+            if not os.path.exists(CERT_PATH) or not os.path.exists(KEY_PATH):
+                logger.warning("TLS certificates not found. Falling back to insecure mode.")
+                return None
+            with open(KEY_PATH, "rb") as key_file:
+                private_key = key_file.read()
+            with open(CERT_PATH, "rb") as cert_file:
+                certificate_chain = cert_file.read()
+            logger.info("TLS certificates loaded successfully")
+            return grpc.ssl_server_credentials([(private_key, certificate_chain)])
+        except Exception as e:
+            logger.error(f"TLS credential loading failed: {e}")
+            return None
+    return None
 
 # =========================================================
 # STARTUP VALIDATION
 # =========================================================
 async def startup_checks():
-
-    logger.info(
-        "Running startup validation..."
-    )
-
+    logger.info("Running startup validation...")
     try:
-
         AnalyzerService()
-
-        logger.info(
-            "AnalyzerService initialized"
-        )
-
+        logger.info("AnalyzerService initialized")
     except Exception as e:
-
-        logger.exception(
-            f"Startup validation failed: "
-            f"{str(e)}"
-        )
-
+        logger.exception(f"Startup validation failed: {str(e)}")
         raise
 
 # =========================================================
 # GRACEFUL SHUTDOWN
 # =========================================================
 async def graceful_shutdown(server):
-
-    logger.warning(
-        "Graceful shutdown initiated"
-    )
-
-    await server.stop(
-        grace=10
-    )
-
-    logger.warning(
-        "gRPC server stopped safely"
-    )
+    logger.warning("Graceful shutdown initiated")
+    await server.stop(grace=10)
+    logger.warning("gRPC server stopped safely")
 
 # =========================================================
 # CREATE SERVER
 # =========================================================
 def create_server():
-
-    logger.info(
-        "Creating async enterprise gRPC server..."
-    )
-
+    logger.info("Creating async enterprise gRPC server...")
     return grpc.aio.server(
-        futures.ThreadPoolExecutor(
-            max_workers=MAX_WORKERS
-        ),
-        interceptors=[
-            AuthInterceptor(),
-        ],
+        futures.ThreadPoolExecutor(max_workers=MAX_WORKERS),
+        interceptors=[AuthInterceptor()],
         options=KEEPALIVE_OPTIONS,
     )
 
 # =========================================================
-# REGISTER SERVICES
+# REGISTER SERVICES (FIXED)
 # =========================================================
 def register_services(server):
-
-    # IMPORTANT:
-    # Your generated proto currently contains:
-    # UserServiceServicer
-    # NOT AnalyzerServiceServicer
-    #
-    # So this registration is correct for your current setup.
-
-    analyzer_pb2_grpc.add_UserServiceServicer_to_server(
-        AnalyzerService(),
-        server,
-    )
-
-    logger.info(
-        "AnalyzerService registered"
-    )
+    """Fixed service registration"""
+    try:
+        # ✅ FIXED: Use correct method name from generated pb2_grpc
+        analyzer_pb2_grpc.add_AnalyzerServiceServicer_to_server(
+            AnalyzerService(),
+            server,
+        )
+        logger.info("✅ AnalyzerService registered successfully")
+    except AttributeError as e:
+        logger.error(f"Registration failed: {e}")
+        logger.error("Make sure your .proto file defines 'AnalyzerService' and you regenerated the pb2 files.")
+        raise
+    except Exception as e:
+        logger.error(f"Service registration error: {e}")
+        raise
 
 # =========================================================
 # ENABLE REFLECTION
 # =========================================================
 def enable_reflection(server):
-
-    SERVICE_NAMES = (
-        reflection.SERVICE_NAME,
-    )
-
-    reflection.enable_server_reflection(
-        SERVICE_NAMES,
-        server,
-    )
-
-    logger.info(
-        "gRPC reflection enabled"
-    )
+    SERVICE_NAMES = (reflection.SERVICE_NAME,)
+    reflection.enable_server_reflection(SERVICE_NAMES, server)
+    logger.info("gRPC reflection enabled")
 
 # =========================================================
 # CONFIGURE PORTS
 # =========================================================
 def configure_ports(server):
-
-    if ENABLE_TLS:
-
-        logger.info(
-            "TLS mode enabled"
-        )
-
-        server_credentials = (
-            load_tls_credentials()
-        )
-
-        server.add_secure_port(
-            GRPC_HOST,
-            server_credentials,
-        )
-
-        logger.info(
-            f"🔒 Secure TLS gRPC server running on "
-            f"{GRPC_HOST}"
-        )
-
+    credentials = load_tls_credentials()
+    if credentials and ENABLE_TLS:
+        server.add_secure_port(GRPC_HOST, credentials)
+        logger.info(f"🔒 Secure TLS gRPC server running on {GRPC_HOST}")
     else:
-
-        logger.warning(
-            "⚠️ Running in INSECURE development mode"
-        )
-
-        server.add_insecure_port(
-            GRPC_HOST
-        )
-
-        logger.warning(
-            f"Insecure gRPC server running on "
-            f"{GRPC_HOST}"
-        )
+        server.add_insecure_port(GRPC_HOST)
+        logger.warning(f"⚠️ Insecure gRPC server running on {GRPC_HOST}")
 
 # =========================================================
 # MAIN SERVER
 # =========================================================
 async def serve():
-
     await startup_checks()
-
-    logger.info(
-        "Initializing enterprise gRPC infrastructure..."
-    )
-
+    logger.info("Initializing enterprise gRPC infrastructure...")
+    
     server = create_server()
-
     register_services(server)
-
+    
     if ENABLE_REFLECTION:
         enable_reflection(server)
-
+    
     configure_ports(server)
 
-    # =====================================================
-    # START SERVER
-    # =====================================================
-
+    # Start server
     await server.start()
-
-    logger.info(
-        "Enterprise RPC security layer active"
-    )
-
-    logger.info(
-        "OWASP validation engine loaded"
-    )
-
-    logger.info(
-        "Authentication interceptor enabled"
-    )
-
-    logger.info(
-        "AsyncIO gRPC engine running"
-    )
-
-    logger.info(
-        "Ready for secure RPC traffic"
-    )
+    logger.info("Enterprise RPC security layer active")
+    logger.info("Ready for secure RPC traffic")
 
     try:
-
         await server.wait_for_termination()
-
+    except asyncio.CancelledError:
+        await graceful_shutdown(server)
     except KeyboardInterrupt:
-
-        logger.warning(
-            "Manual shutdown detected"
-        )
-
+        logger.warning("Manual shutdown detected")
         await graceful_shutdown(server)
 
 # =========================================================
 # ENTRYPOINT
 # =========================================================
 if __name__ == "__main__":
-
     try:
-
-        asyncio.run(
-            serve()
-        )
-
+        asyncio.run(serve())
     except Exception as e:
-
-        logger.exception(
-            f"Fatal gRPC server error: "
-            f"{str(e)}"
-        )
+        logger.exception(f"Fatal gRPC server error: {str(e)}")

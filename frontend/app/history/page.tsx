@@ -29,7 +29,7 @@ export default function History() {
 
   const handleDelete = (id: string) => {
     setDeletingId(id);
-    
+
     setTimeout(() => {
       removeScan(id); // You'll need this function in your history lib
       setScans(prev => prev.filter(scan => scan.id !== id));
@@ -61,9 +61,9 @@ export default function History() {
 
       <div className="min-h-screen bg-[#0a0b12] text-white">
         <div className="max-w-6xl mx-auto px-6 py-12">
-          
+
           {/* Header */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: -30 }}
             animate={{ opacity: 1, y: 0 }}
             className="flex justify-between items-center mb-12"
@@ -72,7 +72,7 @@ export default function History() {
               <h1 className="text-5xl font-bold tracking-tighter">Analysis History</h1>
               <p className="text-slate-400 mt-2">Track all your security scans</p>
             </div>
-            
+
             <button
               onClick={handleClearAll}
               className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-6 py-3 rounded-2xl transition-all"
@@ -85,7 +85,7 @@ export default function History() {
           {/* History List */}
           <div className="space-y-6">
             {scans.length === 0 && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="text-center py-20 text-slate-400"
@@ -101,15 +101,15 @@ export default function History() {
                 <motion.div
                   key={scan.id}
                   initial={{ opacity: 0, y: 40 }}
-                  animate={{ 
-                    opacity: isDeleting ? 0 : 1, 
+                  animate={{
+                    opacity: isDeleting ? 0 : 1,
                     y: isDeleting ? 30 : 0,
                     scale: isDeleting ? 0.95 : 1
                   }}
                   transition={{ duration: 0.4 }}
                   className="relative"
                 >
-                  <Card 
+                  <Card
                     className="history-card cursor-pointer group"
                     onClick={() => !isDeleting && handleViewScan(scan)}
                   >

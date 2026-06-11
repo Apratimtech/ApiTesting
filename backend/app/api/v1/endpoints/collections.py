@@ -1,158 +1,303 @@
-from fastapi import APIRouter, HTTPException, status
-from uuid import uuid4
+from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy.orm import Session, selectinload
+from uuid import UUID
 from datetime import datetime
-
-from app.services.storage import storage
+from app.db.postgres import get_db
+from app.models.sidebar import Collection, SavedRequest
 from app.schemas.collection import (
     CreateCollection,
-    CreateRequest
+    UpdateCollection,
+    CreateRequest,
+    UpdateRequest,
+    CollectionTree,
+    RequestResponse
 )
 
-router = APIRouter(
-    prefix="/collections",
-    tags=["Collections"]
-)
+router = APIRouter(tags=["Collections"])
 
 
 # =========================================================
-# 🔹 GET ALL COLLECTIONS
+# HELPER: Build Recursive Tree
+# =========================================================
+def build_tree(collection: Collection) -> dict:
+    requests = []
+    for req in collection.requests:
+        requests.append({
+            "id": str(req.id),
+            "name": req.name,
+            "method": req.method,
+            "url": req.url,
+            "headers": req.headers or {},
+            "body": req.body,
+            "type": getattr(req, "type", "HTTP"),
+            "created_at": req.created_at,
+            "updated_at": req.updated_at,
+        })
+
+    children = [build_tree(child) for child in collection.children]
+
+    return {
+        "id": str(collection.id),
+        "name": collection.name,
+        "parent_id": str(collection.parent_id) if collection.parent_id else None,
+        "requests": requests,
+        "collections": children,
+        "created_at": collection.created_at,
+        "updated_at": collection.updated_at,
+    }
+
+
+# =========================================================
+# GET ALL COLLECTIONS (Recursive Tree)
 # =========================================================
 @router.get("/", status_code=status.HTTP_200_OK)
-async def get_all_collections():
+def get_all_collections(db: Session = Depends(get_db)):
+    # Load root collections with eager loading
+    root_collections = (
+        db.query(Collection)
+        .options(
+            selectinload(Collection.children),
+            selectinload(Collection.requests)
+        )
+        .filter(Collection.parent_id == None)
+        .all()
+    )
 
-    collections = storage.all_collections()
+    data = [build_tree(col) for col in root_collections]
 
     return {
         "success": True,
-        "count": len(collections),
-        "data": collections
+        "count": len(data),
+        "data": data,
     }
 
 
 # =========================================================
-# 🔹 CREATE COLLECTION
+# GET SINGLE COLLECTION
+# =========================================================
+@router.get("/{collection_id}", status_code=status.HTTP_200_OK)
+def get_collection(collection_id: UUID, db: Session = Depends(get_db)):
+    collection = (
+        db.query(Collection)
+        .options(selectinload(Collection.requests), selectinload(Collection.children))
+        .filter(Collection.id == collection_id)
+        .first()
+    )
+
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    return {
+        "success": True,
+        "data": build_tree(collection),
+    }
+
+
+# =========================================================
+# CREATE COLLECTION (Supports Nested)
 # =========================================================
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def create_collection(data: CreateCollection):
+def create_collection(
+    data: CreateCollection,
+    db: Session = Depends(get_db),
+):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Collection name cannot be empty")
 
-    collection = {
-        "id": str(uuid4()),
-        "name": data.name.strip(),
-        "requests": [],
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
-    }
+    # Check for duplicate at same level
+    existing = (
+        db.query(Collection)
+        .filter(
+            Collection.name == name,
+            Collection.parent_id == data.parent_id
+        )
+        .first()
+    )
 
-    storage.add_collection(collection["id"], collection)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="A collection with this name already exists at this level"
+        )
+
+    collection = Collection(
+        name=name,
+        parent_id=data.parent_id
+    )
+
+    db.add(collection)
+    db.commit()
+    db.refresh(collection)
 
     return {
         "success": True,
         "message": "Collection created successfully",
-        "data": collection
+        "data": {
+            "id": str(collection.id),
+            "name": collection.name,
+            "parent_id": str(collection.parent_id) if collection.parent_id else None,
+            "created_at": collection.created_at,
+            "updated_at": collection.updated_at,
+        },
     }
 
 
 # =========================================================
-# 🔹 ADD REQUEST TO COLLECTION
+# UPDATE COLLECTION (Rename)
 # =========================================================
-@router.post("/{collection_id}/request")
-async def add_request_to_collection(
-    collection_id: str,
-    data: CreateRequest
+@router.put("/{collection_id}", status_code=status.HTTP_200_OK)
+def update_collection(
+    collection_id: UUID,
+    data: UpdateCollection,
+    db: Session = Depends(get_db),
 ):
-
-    collection = storage.get_collection(collection_id)
-
+    collection = db.get(Collection, collection_id)
     if not collection:
-        raise HTTPException(
-            status_code=404,
-            detail="Collection not found"
-        )
+        raise HTTPException(status_code=404, detail="Collection not found")
 
-    request_data = {
-        "id": str(uuid4()),
-        "name": data.name.strip(),
-        "method": data.method.value,
-        "url": str(data.url),
-        "headers": data.headers,
-        "body": data.body,
-        "collection_id": collection_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Collection name cannot be empty")
+
+    # Check duplicate at same parent level
+    existing = (
+        db.query(Collection)
+        .filter(
+            Collection.name == name,
+            Collection.parent_id == collection.parent_id,
+            Collection.id != collection_id
+        )
+        .first()
+    )
+
+    if existing:
+        raise HTTPException(status_code=409, detail="Name already exists at this level")
+
+    collection.name = name
+    collection.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(collection)
+
+    return {
+        "success": True,
+        "message": "Collection updated successfully",
+        "data": {
+            "id": str(collection.id),
+            "name": collection.name,
+            "parent_id": str(collection.parent_id) if collection.parent_id else None,
+        },
     }
 
-    collection["requests"].append(request_data)
+
+# =========================================================
+# DELETE COLLECTION (Cascade handled by model)
+# =========================================================
+@router.delete("/{collection_id}", status_code=status.HTTP_200_OK)
+def delete_collection(
+    collection_id: UUID,
+    db: Session = Depends(get_db),
+):
+    collection = db.get(Collection, collection_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    db.delete(collection)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Collection and all nested content deleted successfully",
+    }
+
+
+# =========================================================
+# ADD REQUEST TO COLLECTION
+# =========================================================
+@router.post("/{collection_id}/request", status_code=status.HTTP_201_CREATED)
+def add_request_to_collection(
+    collection_id: UUID,
+    data: CreateRequest,
+    db: Session = Depends(get_db),
+):
+    collection = db.get(Collection, collection_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    request_obj = SavedRequest(
+        collection_id=collection_id,
+        name=data.name.strip(),
+        method=data.method,
+        url=data.url,
+        headers=data.headers,
+        body=data.body,
+        type=data.type,  # Uncomment when SavedRequest model supports 'type' column
+    )
+
+    db.add(request_obj)
+    db.commit()
+    db.refresh(request_obj)
 
     return {
         "success": True,
         "message": "Request added successfully",
-        "data": request_data
+        "data": RequestResponse.model_validate(request_obj).model_dump(),
     }
 
 
 # =========================================================
-# 🔹 DELETE REQUEST
-# =========================================================
-@router.delete("/request/{request_id}")
-async def delete_request(request_id: str):
-
-    collections = storage.all_collections()
-
-    for collection in collections:
-
-        original_count = len(collection["requests"])
-
-        collection["requests"] = [
-            req for req in collection["requests"]
-            if req["id"] != request_id
-        ]
-
-        if len(collection["requests"]) < original_count:
-
-            return {
-                "success": True,
-                "message": "Request deleted successfully"
-            }
-
-    raise HTTPException(
-        status_code=404,
-        detail="Request not found"
-    )
-
-
-# =========================================================
-# 🔹 UPDATE REQUEST
+# UPDATE REQUEST
 # =========================================================
 @router.put("/request/{request_id}")
-async def update_request(
-    request_id: str,
-    data: CreateRequest
+def update_request(
+    request_id: UUID,
+    data: UpdateRequest,
+    db: Session = Depends(get_db),
 ):
+    request_obj = db.get(SavedRequest, request_id)
+    if not request_obj:
+        raise HTTPException(status_code=404, detail="Request not found")
 
-    collections = storage.all_collections()
+    if data.name is not None:
+        request_obj.name = data.name.strip()
+    if data.method is not None:
+        request_obj.method = data.method
+    if data.url is not None:
+        request_obj.url = data.url
+    if data.headers is not None:
+        request_obj.headers = data.headers
+    if data.body is not None:
+        request_obj.body = data.body
 
-    for collection in collections:
+    request_obj.updated_at = datetime.utcnow()
 
-        for request_item in collection["requests"]:
+    db.commit()
+    db.refresh(request_obj)
 
-            if request_item["id"] == request_id:
+    return {
+        "success": True,
+        "message": "Request updated successfully",
+        "data": RequestResponse.model_validate(request_obj).model_dump(),
+    }
 
-                request_item.update({
-                    "name": data.name.strip(),
-                    "method": data.method.value,
-                    "url": str(data.url),
-                    "headers": data.headers,
-                    "body": data.body,
-                    "updated_at": datetime.utcnow().isoformat()
-                })
 
-                return {
-                    "success": True,
-                    "message": "Request updated successfully",
-                    "data": request_item
-                }
+# =========================================================
+# DELETE REQUEST
+# =========================================================
+@router.delete("/request/{request_id}")
+def delete_request(
+    request_id: UUID,
+    db: Session = Depends(get_db),
+):
+    request_obj = db.get(SavedRequest, request_id)
+    if not request_obj:
+        raise HTTPException(status_code=404, detail="Request not found")
 
-    raise HTTPException(
-        status_code=404,
-        detail="Request not found"
-    )
+    db.delete(request_obj)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Request deleted successfully",
+    }

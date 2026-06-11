@@ -8,10 +8,12 @@ import logging
 from datetime import datetime
 
 # =========================================================
-# CORRECT IMPORT
+# IMPORTS
 # =========================================================
 
 from app.services.graphql_service import GraphQLService
+from app.services.analyzer_storage import analyzer_storage
+from app.db.postgres import SessionLocal
 
 
 # =========================================================
@@ -27,7 +29,6 @@ class GraphQLHandler:
     async def handle(payload):
 
         request_id = str(uuid.uuid4())
-
         request_start = datetime.utcnow()
 
         try:
@@ -43,6 +44,133 @@ class GraphQLHandler:
             result = await GraphQLService.process_graphql_request(
                 payload
             )
+
+            # =================================================
+            # SAVE ANALYSIS TO DATABASE
+            # =================================================
+
+            db = SessionLocal()
+
+            try:
+
+                analyzer_storage.save_analysis(
+                    db=db,
+
+                    request_data={
+                        "url": getattr(
+                            payload,
+                            "endpoint",
+                            None
+                        ),
+
+                        "method": "POST",
+
+                        "protocol": "GRAPHQL",
+
+                        "headers": getattr(
+                            payload,
+                            "headers",
+                            {}
+                        ),
+
+                        "body": {
+                            "query": getattr(
+                                payload,
+                                "query",
+                                None
+                            ),
+
+                            "variables": getattr(
+                                payload,
+                                "variables",
+                                {}
+                            ),
+                        },
+
+                        "protocol_metadata": {
+                            "auth_type": getattr(
+                                payload,
+                                "auth_type",
+                                None
+                            ),
+                        }
+                    },
+
+                    response_data={
+                        "status": result.get(
+                            "status_code"
+                        ),
+
+                        "headers": result.get(
+                            "headers",
+                            {}
+                        ),
+
+                        "body": result.get(
+                            "response",
+                            {}
+                        ),
+
+                        "rawText": str(
+                            result.get(
+                                "response",
+                                {}
+                            )
+                        ),
+
+                        "success": result.get(
+                            "success",
+                            False
+                        ),
+
+                        "error": result.get(
+                            "error"
+                        ),
+
+                        "details": result.get(
+                            "details"
+                        ),
+                    },
+
+                    analysis_result={
+
+                        "success": result.get(
+                            "success",
+                            False
+                        ),
+
+                        "severity": result.get(
+                            "severity",
+                            "LOW"
+                        ),
+
+                        "overall_risk_score": result.get(
+                            "risk_score",
+                            0
+                        ),
+
+                        "summary": "GraphQL Analysis",
+
+                        "generated_by": "Trust_Edge",
+
+                        "analyzer_version": "2.5",
+
+                        "findings": result.get(
+                            "findings",
+                            []
+                        ),
+                    }
+                )
+
+            except Exception as storage_error:
+
+                logger.error(
+                    f"[{request_id}] Failed to save analysis: "
+                    f"{str(storage_error)}"
+                )
+
+            finally:
+                db.close()
 
             # =================================================
             # FAILED RESPONSE
@@ -94,7 +222,10 @@ class GraphQLHandler:
 
             return {
 
-                "success": True,
+                "success": result.get(
+                    "success",
+                    True
+                ),
 
                 "request_id": request_id,
 
