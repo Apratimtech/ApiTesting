@@ -1,0 +1,9 @@
+DECISION TREE RESULTS
+
+Accuracy: 0.8675
+
+Features Used:
+- protocol
+- method
+- risk_score
+- duration

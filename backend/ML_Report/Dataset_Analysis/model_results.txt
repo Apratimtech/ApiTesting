@@ -1,0 +1,6 @@
+MODEL COMPARISON
+
+Logistic Regression: 0.9157
+Decision Tree: 0.9277
+KNN: 0.9277
+Random Forest: 0.9277

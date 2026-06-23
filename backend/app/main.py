@@ -17,6 +17,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.grpc import router as grpc_router
 from app.graphql.graphql_router import router as graphql_router
 from app.mqtt.router import router as mqtt_router
+from app.ml.router import router as ml_router
 from app.core.xml_loader import config
 from app.grpc_proto.grpc_server import serve
 import logging
@@ -284,6 +285,7 @@ app.include_router(
     mqtt_router,
     prefix="/api/v1"
 )
+app.include_router(ml_router)
 
 # =========================================================
 # ANALYZER ENDPOINT

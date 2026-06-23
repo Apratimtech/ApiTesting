@@ -1,0 +1,6 @@
+LOGISTIC REGRESSION RESULTS
+
+Accuracy: 0.9157
+
+Algorithm Type: Supervised Classification
+Purpose: Predict API Severity Levels

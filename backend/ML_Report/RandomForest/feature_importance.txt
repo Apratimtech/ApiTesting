@@ -1,0 +1,6 @@
+RANDOM FOREST FEATURE IMPORTANCE
+
+protocol: 0.1125
+method: 0.1577
+risk_score: 0.7006
+duration: 0.0292

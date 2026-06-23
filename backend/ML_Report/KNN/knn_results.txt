@@ -1,0 +1,6 @@
+KNN RESULTS
+
+Accuracy: 0.9277
+
+Algorithm Type: Supervised Classification
+Purpose: Predict API Severity Levels
