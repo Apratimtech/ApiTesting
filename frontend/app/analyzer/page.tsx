@@ -1,5 +1,4 @@
 "use client";
-
 import { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -32,7 +31,6 @@ import { Badge } from "@/components/ui/badge";
 // ─────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────
-
 type HttpMethod =
   | "GET"
   | "POST"
@@ -40,14 +38,12 @@ type HttpMethod =
   | "PATCH"
   | "DELETE"
   | "HEAD";
-
 type AuthType =
   | "no-auth"
   | "bearer"
   | "basic"
   | "api-key"
   | "jwt";
-
 type BodyType =
   | "none"
   | "json"
@@ -57,25 +53,21 @@ type BodyType =
   | "graphql"
   | "html"
   | "javascript";
-
 interface Header {
   key: string;
   value: string;
 }
-
 interface Finding {
   issue: string;
   severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
   description: string;
   category?: string;
 }
-
 interface SecurityResult {
   findings?: Finding[];
   overall_risk_score?: number;
   success?: boolean;
 }
-
 interface ApiResponse {
   status?: number;
   statusText?: string;
@@ -88,18 +80,14 @@ interface ApiResponse {
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
-
 const BACKEND_URL = "http://localhost:8000/api/v1/analyze";
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 const MAX_DISPLAY_SIZE = 50000;
-
 const NO_BODY_METHODS: HttpMethod[] = ["GET", "HEAD", "DELETE"];
-
 const DEFAULT_JSON_BODY = `{
   "username": "admin",
   "password": "123456"
 }`;
-
 const severityColors: Record<string, string> = {
   CRITICAL: "bg-red-600 text-white",
   HIGH: "bg-orange-500 text-white",
@@ -107,7 +95,6 @@ const severityColors: Record<string, string> = {
   LOW: "bg-emerald-600 text-white",
   INFO: "bg-blue-600 text-white",
 };
-
 const severityBorder: Record<string, string> = {
   CRITICAL: "border-red-500/60",
   HIGH: "border-orange-500/60",
@@ -115,7 +102,6 @@ const severityBorder: Record<string, string> = {
   LOW: "border-emerald-500/60",
   INFO: "border-blue-500/60",
 };
-
 const severityOrder: Record<string, number> = {
   CRITICAL: 5,
   HIGH: 4,
@@ -127,11 +113,10 @@ const severityOrder: Record<string, number> = {
 // ─────────────────────────────────────────────────────────────
 // COMPONENT
 // ─────────────────────────────────────────────────────────────
-
 export default function Analyzer() {
   const [method, setMethod] = useState<HttpMethod>("POST");
   const [url, setUrl] = useState("https://httpbin.org/anything");
-
+  
   // AUTH
   const [authType, setAuthType] = useState<AuthType>("bearer");
   const [bearer, setBearer] = useState("");
@@ -147,7 +132,7 @@ export default function Analyzer() {
   // BODY
   const [bodyType, setBodyType] = useState<BodyType>("json");
   const [body, setBody] = useState(DEFAULT_JSON_BODY);
-  const [graphqlVariables, setGraphqlVariables] = useState(`{\n  "id": 1\n}`);
+  const [graphqlVariables, setGraphqlVariables] = useState(`{\n "id": 1\n}`);
 
   // RESULTS
   const [apiResponse, setApiResponse] = useState<ApiResponse | null>(null);
@@ -155,7 +140,6 @@ export default function Analyzer() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"response" | "security">("security");
   const [responseSubTab, setResponseSubTab] = useState<"body" | "headers" | "raw">("body");
-
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -192,7 +176,6 @@ export default function Analyzer() {
   useEffect(() => {
     if (prevBodyType.current === bodyType) return;
     prevBodyType.current = bodyType;
-
     switch (bodyType) {
       case "none":
         setBody("");
@@ -207,7 +190,7 @@ export default function Analyzer() {
         setBody("// JavaScript payload");
         break;
       case "graphql":
-        setBody(`query User($id: ID!) {\n  user(id: $id) {\n    id\n    name\n  }\n}`);
+        setBody(`query User($id: ID!) {\n user(id: $id) {\n id\n name\n }\n}`);
         break;
       default:
         setBody("");
@@ -222,7 +205,6 @@ export default function Analyzer() {
       javascript: "application/javascript",
       "x-www-form-urlencoded": "application/x-www-form-urlencoded",
     };
-
     if (contentTypeMap[bodyType]) {
       setHeaders((prev) => {
         const filtered = prev.filter((h) => h.key.toLowerCase() !== "content-type");
@@ -234,7 +216,9 @@ export default function Analyzer() {
   // ─────────────────────────────────────────────────────────
   // HEADER HELPERS
   // ─────────────────────────────────────────────────────────
-  const addHeader = () => setHeaders((prev) => [...prev, { key: "", value: "" }]);
+  const addHeader = () => {
+    setHeaders((prev) => [...prev, { key: "", value: "" }]);
+  };
 
   const removeHeader = (index: number) => {
     setHeaders((prev) => prev.filter((_, i) => i !== index));
@@ -262,13 +246,11 @@ export default function Analyzer() {
     if ((authType === "bearer" || authType === "jwt") && bearer.trim()) {
       normalized.set("authorization", `Bearer ${bearer.trim()}`);
     }
-
     if (authType === "basic" && basicUser.trim() && basicPass.trim()) {
       const credentials = `${basicUser}:${basicPass}`;
       const encoded = btoa(unescape(encodeURIComponent(credentials)));
       normalized.set("authorization", `Basic ${encoded}`);
     }
-
     if (authType === "api-key" && apiKey.trim()) {
       normalized.set("x-api-key", apiKey.trim());
     }
@@ -293,7 +275,6 @@ export default function Analyzer() {
       showToast("Please enter a valid HTTP/HTTPS URL", "error");
       return;
     }
-
     if (body.length > MAX_BODY_SIZE) {
       showToast("Body size exceeds 1MB limit", "error");
       return;
@@ -302,7 +283,6 @@ export default function Analyzer() {
     setLoading(true);
     setApiResponse(null);
     setSecurityResult(null);
-
     abortControllerRef.current = new AbortController();
     const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000);
 
@@ -313,8 +293,8 @@ export default function Analyzer() {
       });
 
       const allowsBody = !NO_BODY_METHODS.includes(targetMethod) && bodyType !== "none" && body.trim();
-
       let finalBody: unknown = undefined;
+
       if (allowsBody) {
         if (bodyType === "json") {
           try { finalBody = JSON.parse(body); } catch { finalBody = body; }
@@ -373,13 +353,12 @@ export default function Analyzer() {
       });
 
       if (!analyzeRes.ok) throw new Error(`Analyzer error: ${analyzeRes.status}`);
-
+      
       const analyzeData = await analyzeRes.json();
       setSecurityResult({
         ...analyzeData,
         overall_risk_score: Math.min(100, Math.max(0, analyzeData.overall_risk_score || 0)),
       });
-
       setActiveTab("security");
     } catch (err: any) {
       showToast(err.message || "Request failed", "error");
@@ -457,9 +436,7 @@ export default function Analyzer() {
                 ))}
               </SelectContent>
             </Select>
-
             <Input value={url} onChange={(e) => setUrl(e.target.value)} className="flex-1 h-12 font-mono bg-slate-900/80 border-slate-700" placeholder="https://api.example.com" />
-
             <Button onClick={handleSend} disabled={loading} className="h-12 px-10 bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700">
               <AnimatePresence mode="wait">
                 {loading ? (
@@ -474,7 +451,6 @@ export default function Analyzer() {
                 )}
               </AnimatePresence>
             </Button>
-
             {lastRequestRef.current && (
               <Button onClick={handleReplay} disabled={loading} variant="outline">
                 <RotateCw className="w-4 h-4 mr-2" /> Replay
@@ -506,48 +482,56 @@ export default function Analyzer() {
                         <SelectItem value="jwt">JWT Token</SelectItem>
                       </SelectContent>
                     </Select>
-
                     {(authType === "bearer" || authType === "jwt") && (
                       <Input value={bearer} onChange={(e) => setBearer(e.target.value)} placeholder="Enter Bearer / JWT Token" />
                     )}
-
                     {authType === "basic" && (
                       <div className="grid grid-cols-2 gap-4">
                         <Input value={basicUser} onChange={(e) => setBasicUser(e.target.value)} placeholder="Username" />
                         <Input value={basicPass} onChange={(e) => setBasicPass(e.target.value)} type="password" placeholder="Password" />
                       </div>
                     )}
-
                     {authType === "api-key" && (
                       <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" />
                     )}
                   </TabsContent>
 
+                  {/* HEADERS SECTION - Fixed */}
                   <TabsContent value="headers" className="space-y-4">
-                    {syncedHeaders.map((h, i) => {
-                      const isProtected = ["authorization", "x-api-key"].includes(h.key.toLowerCase());
+                    {headers.map((h, i) => {
+                      const isAuthHeader = ["authorization", "x-api-key"].some(key => 
+                        h.key.toLowerCase().includes(key)
+                      );
                       return (
                         <div key={i} className="flex gap-3 items-center">
-                          <Input 
-                            value={h.key} 
-                            disabled={isProtected} 
-                            placeholder="Header Key" 
-                            onChange={() => {}} // Prevents React warning
+                          <Input
+                            value={h.key}
+                            placeholder="Header Key"
+                            onChange={(e) => updateHeader(i, "key", e.target.value)}
+                            className="font-mono"
+                            disabled={isAuthHeader}
                           />
-                          <Input 
-                            value={h.value} 
-                            disabled={isProtected} 
-                            placeholder="Header Value" 
-                            onChange={() => {}} // Prevents React warning
+                          <Input
+                            value={h.value}
+                            placeholder="Header Value"
+                            onChange={(e) => updateHeader(i, "value", e.target.value)}
+                            className="font-mono"
+                            disabled={isAuthHeader}
                           />
-                          {!isProtected && (
-                            <Button variant="ghost" onClick={() => removeHeader(i)}>
+                          {!isAuthHeader && (
+                            <Button 
+                              variant="ghost" 
+                              size="icon"
+                              onClick={() => removeHeader(i)}
+                              className="shrink-0"
+                            >
                               <Trash2 className="w-4 h-4" />
                             </Button>
                           )}
                         </div>
                       );
                     })}
+
                     <Button onClick={addHeader} variant="outline" className="w-full">
                       <Plus className="w-4 h-4 mr-2" /> Add Header
                     </Button>
@@ -565,7 +549,6 @@ export default function Analyzer() {
                         <SelectItem value="graphql">GraphQL</SelectItem>
                       </SelectContent>
                     </Select>
-
                     {bodyType !== "none" && (
                       <>
                         <Textarea value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[320px] font-mono" placeholder="Request body..." />
@@ -608,7 +591,6 @@ export default function Analyzer() {
                             <TabsTrigger value="headers">Headers</TabsTrigger>
                             <TabsTrigger value="raw">Raw</TabsTrigger>
                           </TabsList>
-
                           <TabsContent value="body">
                             <Button variant="outline" size="sm" className="mb-3" onClick={() => copyToClipboard(JSON.stringify(apiResponse.body || apiResponse.rawText, null, 2), "Response Body")}>
                               <Copy className="w-4 h-4 mr-2" /> Copy Body
@@ -617,13 +599,11 @@ export default function Analyzer() {
                               {displayResponseBody(apiResponse)}
                             </pre>
                           </TabsContent>
-
                           <TabsContent value="headers">
                             <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800">
                               {JSON.stringify(apiResponse.headers, null, 2)}
                             </pre>
                           </TabsContent>
-
                           <TabsContent value="raw">
                             <pre className="bg-black p-6 rounded-2xl text-sm overflow-auto max-h-[500px] font-mono border border-slate-800 whitespace-pre-wrap">
                               {apiResponse.rawText || "No raw content"}

@@ -2,6 +2,8 @@ import asyncio
 import ssl
 from datetime import datetime
 import asyncio_mqtt
+import traceback  # Added for better error debugging
+
 
 class MQTTClientManager:
     def __init__(self):
@@ -23,20 +25,20 @@ class MQTTClientManager:
                 async for message in messages:
                     try:
                         payload = message.payload.decode('utf-8') if isinstance(message.payload, bytes) else str(message.payload)
-                        
+
                         msg_data = {
                             "topic": message.topic,
                             "payload": payload,
                             "qos": message.qos,
                             "timestamp": datetime.utcnow().isoformat(),
                         }
-                        
+
                         self.messages.append(msg_data)
-                        
+
                         # Keep only last 500 messages to prevent memory bloat
                         if len(self.messages) > 500:
                             self.messages.pop(0)
-                        
+
                         self.logs.append({
                             "timestamp": datetime.utcnow().isoformat(),
                             "event": "IN",
@@ -76,6 +78,15 @@ class MQTTClientManager:
                     tls_context.check_hostname = False
                     tls_context.verify_mode = ssl.CERT_NONE
 
+            # === DEBUG PRINTS ===
+            print("=" * 80)
+            print("HOST =", broker_host)
+            print("PORT =", broker_port)
+            print("TLS =", tls_enabled)
+            print("USERNAME =", username)
+            print("CLIENT_ID =", client_id)
+            print("=" * 80)
+
             self.client = asyncio_mqtt.Client(
                 hostname=broker_host,
                 port=broker_port,
@@ -109,6 +120,9 @@ class MQTTClientManager:
                 "client_id": client_id,
             }
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+
             self.logs.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "event": "ERROR",
@@ -148,6 +162,7 @@ class MQTTClientManager:
                 "message_id": int(datetime.utcnow().timestamp())
             }
         except Exception as e:
+            traceback.print_exc()
             return {
                 "success": False,
                 "message": str(e)
@@ -160,12 +175,12 @@ class MQTTClientManager:
     ):
         if not self.connected or not self.client:
             raise Exception("MQTT not connected")
-        
+
         await self.client.subscribe(topic, qos=qos)
-        
+
         if topic not in self.subscriptions:
             self.subscriptions.append(topic)
-        
+
         self.logs.append({
             "timestamp": datetime.utcnow().isoformat(),
             "event": "SUBSCRIBE",
@@ -181,12 +196,12 @@ class MQTTClientManager:
     ):
         if not self.connected or not self.client:
             raise Exception("MQTT not connected")
-        
+
         await self.client.unsubscribe(topic)
-        
+
         if topic in self.subscriptions:
             self.subscriptions.remove(topic)
-        
+
         self.logs.append({
             "timestamp": datetime.utcnow().isoformat(),
             "event": "UNSUBSCRIBE",
@@ -242,6 +257,7 @@ class MQTTClientManager:
                 "success": True
             }
         except Exception as e:
+            traceback.print_exc()
             return {
                 "success": False,
                 "message": str(e)

@@ -94,20 +94,6 @@ export default function MQTTConsolePage() {
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
-  // ====================== SAFE TEXT HELPER ======================
-  const safeText = (val: any): string => {
-    if (val === null || val === undefined) return "";
-    if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
-      return String(val);
-    }
-    if (typeof val === "object") {
-      if ("value" in val) return String((val as any).value);
-      return JSON.stringify(val);
-    }
-    return String(val);
-  };
-  // ============================================================
-
   const addLog = useCallback((type: LogType, message: string, topic?: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour12: false });
     const newLog: LogEntry = {
@@ -180,7 +166,11 @@ export default function MQTTConsolePage() {
 
   const updateAnalysisUI = useCallback((data: any) => {
     if (data.success) {
-      setLatency(safeText(data.latency));
+      const rawLatency = data.latency;
+      const sanitizedLatency = rawLatency && typeof rawLatency === "object"
+        ? String(rawLatency.value || JSON.stringify(rawLatency))
+        : String(rawLatency || "--");
+      setLatency(sanitizedLatency);
 
       const rawRisk = data.riskScore && typeof data.riskScore === "object"
         ? Number(data.riskScore.value || 0)
@@ -188,13 +178,31 @@ export default function MQTTConsolePage() {
       setRiskScore(Math.max(0, Math.min(rawRisk, 100)));
 
       const rawFindings = data.securityFindings || [];
-      const sanitizedFindings = rawFindings.map((finding: any) => ({
-        severity: finding.severity || "MEDIUM",
-        title: safeText(finding.title),
-        description: safeText(finding.description),
-        cwe: finding.cwe ? safeText(finding.cwe) : undefined,
-        owasp: finding.owasp ? safeText(finding.owasp) : undefined,
-      }));
+      const sanitizedFindings = rawFindings.map((finding: any) => {
+        const title = finding.title && typeof finding.title === "object"
+          ? String(finding.title.value || JSON.stringify(finding.title))
+          : String(finding.title || "Unknown Issue");
+
+        const description = finding.description && typeof finding.description === "object"
+          ? String(finding.description.value || JSON.stringify(finding.description))
+          : String(finding.description || "No description provided.");
+
+        const cwe = finding.cwe && typeof finding.cwe === "object"
+          ? String(finding.cwe.value || JSON.stringify(finding.cwe))
+          : finding.cwe ? String(finding.cwe) : undefined;
+
+        const owasp = finding.owasp && typeof finding.owasp === "object"
+          ? String(finding.owasp.value || JSON.stringify(finding.owasp))
+          : finding.owasp ? String(finding.owasp) : undefined;
+
+        return {
+          severity: finding.severity || "MEDIUM",
+          title,
+          description,
+          cwe,
+          owasp
+        };
+      });
 
       setSecurityFindings(sanitizedFindings.slice(0, 100));
     }
@@ -260,6 +268,61 @@ export default function MQTTConsolePage() {
     }));
   }, []);
 
+  // Fixed startPolling - moved after function definitions to avoid hoisting error
+  const startPolling = useCallback(() => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+
+    pollIntervalRef.current = setInterval(async () => {
+      if (!connectedRef.current) return;
+
+      try {
+        const status = await callBackend("status", {}, 5000, "GET");
+        if (!status.success || !status.data?.connected) {
+          if (reconnectAttemptsRef.current >= MAX_RETRIES) {
+            addLog("ERROR", "Maximum reconnect attempts reached. Please reconnect manually.");
+            await disconnectBroker(true);
+            return;
+          }
+          reconnectAttemptsRef.current += 1;
+          setReconnecting(true);
+          addLog("WARN", `Connection lost. Reconnecting... (${reconnectAttemptsRef.current}/${MAX_RETRIES})`);
+          await disconnectBroker(true);
+          setTimeout(() => connectBroker(true), 1500);
+          return;
+        }
+
+        const msgRes = await callBackend("messages", {}, 5000, "GET");
+        if (msgRes.success && Array.isArray(msgRes.messages)) {
+          msgRes.messages.forEach((msg: any) => {
+            const key = `${msg.timestamp || Date.now()}-${msg.topic}`;
+            if (processedMessagesRef.current.has(key)) return;
+
+            processedMessagesRef.current.add(key);
+
+            let stringPayload = "";
+            if (msg.payload && typeof msg.payload === "object") {
+              stringPayload = msg.payload.value ? String(msg.payload.value) : JSON.stringify(msg.payload);
+            } else {
+              stringPayload = String(msg.payload || "");
+            }
+
+            const masked = maskSensitiveData(stringPayload);
+            addLog("IN", masked, msg.topic);
+          });
+
+          if (msgRes.messages.length > 0) {
+            setMetrics((prev) => ({
+              ...prev,
+              messagesReceived: prev.messagesReceived + msgRes.messages.length,
+            }));
+          }
+        }
+      } catch {
+        // Silent for polling
+      }
+    }, 5000);
+  }, [addLog, connectBroker, disconnectBroker]);
+
   const connectBroker = async (isReconnect = false) => {
     if (connecting) return;
     setConnecting(true);
@@ -272,6 +335,16 @@ export default function MQTTConsolePage() {
     }
 
     const validation = validateBrokerUrl(brokerUrl);
+
+    console.log("=== CONNECT DEBUG ===");
+    console.log("Raw Broker URL:", brokerUrl);
+    console.log("Validation Result:", validation);
+    console.log("Sending to backend:", {
+      broker_host: validation.host,
+      broker_port: validation.port,
+      tls_enabled: validation.isSecure,
+    });
+    console.log("=====================");
 
     if (!validation.valid) {
       addLog("ERROR", validation.error || "Invalid broker URL");
@@ -347,65 +420,6 @@ export default function MQTTConsolePage() {
     }
   };
 
-  const startPolling = useCallback(() => {
-    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-
-    pollIntervalRef.current = setInterval(async () => {
-      if (!connectedRef.current) return;
-
-      try {
-        const status = await callBackend("status", {}, 5000, "GET");
-        if (!status.success || !status.data?.connected) {
-          if (reconnectAttemptsRef.current >= MAX_RETRIES) {
-            addLog("ERROR", "Maximum reconnect attempts reached. Please reconnect manually.");
-            await disconnectBroker(true);
-            return;
-          }
-          reconnectAttemptsRef.current += 1;
-          setReconnecting(true);
-          addLog("WARN", `Connection lost. Reconnecting... (${reconnectAttemptsRef.current}/${MAX_RETRIES})`);
-          await disconnectBroker(true);
-          setTimeout(() => connectBroker(true), 1500);
-          return;
-        }
-
-        const msgRes = await callBackend("messages", {}, 5000, "GET");
-        if (msgRes.success && Array.isArray(msgRes.messages)) {
-          msgRes.messages.forEach((msg: any) => {
-            const key = `${msg.timestamp || Date.now()}-${msg.topic}`;
-            if (processedMessagesRef.current.has(key)) return;
-            processedMessagesRef.current.add(key);
-
-            // === SAFE NORMALIZATION ===
-            const normalize = (v: any) => {
-              if (v === null || v === undefined) return "";
-              if (typeof v === "object") {
-                if ("value" in v) return String(v.value);
-                return JSON.stringify(v);
-              }
-              return String(v);
-            };
-
-            const normalizedTopic = normalize(msg.topic);
-            const normalizedPayload = normalize(msg.payload);
-            const masked = maskSensitiveData(normalizedPayload);
-
-            addLog("IN", masked, normalizedTopic);
-          });
-
-          if (msgRes.messages.length > 0) {
-            setMetrics((prev) => ({
-              ...prev,
-              messagesReceived: prev.messagesReceived + msgRes.messages.length,
-            }));
-          }
-        }
-      } catch {
-        // Silent for polling
-      }
-    }, 5000);
-  }, [addLog, connectBroker, disconnectBroker]);
-
   const publishMessage = async () => {
     if (!connected) { addLog("ERROR", "Cannot publish - not connected"); return; }
     if (!topic.trim()) { addLog("ERROR", "Topic is required"); return; }
@@ -442,10 +456,7 @@ export default function MQTTConsolePage() {
       if (res.success) {
         addLog("SYS", `Subscribed to ${topic}`);
         updateAnalysisUI(res);
-        setMetrics((prev) => ({
-          ...prev,
-          subscriptions: prev.subscriptions + 1,
-        }));
+        setMetrics((prev) => ({ ...prev, subscriptions: prev.subscriptions + 1 }));
       } else {
         addLog("ERROR", res.message || "Subscribe failed");
       }
@@ -515,6 +526,7 @@ export default function MQTTConsolePage() {
   useEffect(() => {
     const defaultClientId = `trustedge_${Math.random().toString(16).slice(2, 10)}`;
     setClientId(defaultClientId);
+
     addLog("SYS", "TrustEdge MQTT Analyzer initialized");
     addLog("INFO", "Frontend connected to backend validation layer");
   }, [addLog]);
@@ -531,6 +543,7 @@ export default function MQTTConsolePage() {
   return (
     <main className="min-h-screen bg-[#03101f] text-[#d9e7ff]">
       <div className="p-6 max-w-[1600px] mx-auto">
+        {/* Header */}
         <div className="flex items-center gap-4 mb-10">
           <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center shadow-[0_0_30px_rgba(139,92,246,0.5)]">
             <Bolt className="w-7 h-7 text-black" />
@@ -563,11 +576,20 @@ export default function MQTTConsolePage() {
             <div className="space-y-5">
               <div>
                 <label className="text-xs uppercase text-gray-400 block mb-2">Broker URL</label>
-                <input value={brokerUrl} onChange={(e) => setBrokerUrl(e.target.value)} className="w-full bg-[#0b1d33] border border-white/10 rounded-xl p-4 outline-none focus:border-cyan-400" placeholder="mqtts://broker.emqx.io:8883" />
+                <input
+                  value={brokerUrl}
+                  onChange={(e) => setBrokerUrl(e.target.value)}
+                  className="w-full bg-[#0b1d33] border border-white/10 rounded-xl p-4 outline-none focus:border-cyan-400"
+                  placeholder="mqtts://broker.emqx.io:8883"
+                />
               </div>
               <div>
                 <label className="text-xs uppercase text-gray-400 block mb-2">Client ID</label>
-                <input value={clientId} onChange={(e) => setClientId(e.target.value)} className="w-full bg-[#0b1d33] border border-white/10 rounded-xl p-4 outline-none focus:border-cyan-400" />
+                <input
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  className="w-full bg-[#0b1d33] border border-white/10 rounded-xl p-4 outline-none focus:border-cyan-400"
+                />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -595,11 +617,19 @@ export default function MQTTConsolePage() {
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-4 pt-3">
-                <button onClick={() => connectBroker(false)} disabled={connecting || connected} className="col-span-3 py-4 rounded-xl bg-gradient-to-r from-cyan-400 to-purple-500 text-black font-bold hover:brightness-110 transition-all disabled:opacity-70 flex items-center justify-center gap-2">
+                <button
+                  onClick={() => connectBroker(false)}
+                  disabled={connecting || connected}
+                  className="col-span-3 py-4 rounded-xl bg-gradient-to-r from-cyan-400 to-purple-500 text-black font-bold hover:brightness-110 transition-all disabled:opacity-70 flex items-center justify-center gap-2"
+                >
                   {connecting && <Loader2 className="w-5 h-5 animate-spin" />}
                   {connecting ? "Connecting..." : "Connect Broker"}
                 </button>
-                <button onClick={() => disconnectBroker(false)} disabled={!connected || loadingDisconnect} className="border border-red-400/20 rounded-xl text-red-300 hover:bg-red-400/10 transition-all disabled:opacity-50 flex items-center justify-center">
+                <button
+                  onClick={() => disconnectBroker(false)}
+                  disabled={!connected || loadingDisconnect}
+                  className="border border-red-400/20 rounded-xl text-red-300 hover:bg-red-400/10 transition-all disabled:opacity-50 flex items-center justify-center"
+                >
                   {loadingDisconnect ? <Loader2 className="w-4 h-4 animate-spin" /> : "Disconnect"}
                 </button>
               </div>
@@ -624,15 +654,28 @@ export default function MQTTConsolePage() {
               </div>
               <div>
                 <label className="text-xs uppercase text-gray-400 block mb-2">Message Payload</label>
-                <textarea value={payload} onChange={(e) => setPayload(e.target.value)} spellCheck={false} className="w-full min-h-[320px] bg-[#020b18] border border-white/10 rounded-xl p-5 font-mono text-sm outline-none resize-none text-cyan-100" />
+                <textarea
+                  value={payload}
+                  onChange={(e) => setPayload(e.target.value)}
+                  spellCheck={false}
+                  className="w-full min-h-[320px] bg-[#020b18] border border-white/10 rounded-xl p-5 font-mono text-sm outline-none resize-none text-cyan-100"
+                />
               </div>
               <div className="grid grid-cols-4 gap-4">
-                <button onClick={publishMessage} disabled={loadingPublish || !connected} className="col-span-3 py-4 rounded-xl bg-[#d7b6ff] text-purple-900 font-bold flex items-center justify-center gap-2 hover:brightness-110 disabled:opacity-70">
+                <button
+                  onClick={publishMessage}
+                  disabled={loadingPublish || !connected}
+                  className="col-span-3 py-4 rounded-xl bg-[#d7b6ff] text-purple-900 font-bold flex items-center justify-center gap-2 hover:brightness-110 disabled:opacity-70"
+                >
                   {loadingPublish && <Loader2 className="w-5 h-5 animate-spin" />}
                   <Upload className="w-4 h-4" />
                   Publish
                 </button>
-                <button onClick={subscribeTopic} disabled={loadingSubscribe || !connected} className="rounded-xl border border-white/10 bg-[#16273b] hover:bg-[#22354a] transition-all flex items-center justify-center gap-2 disabled:opacity-70">
+                <button
+                  onClick={subscribeTopic}
+                  disabled={loadingSubscribe || !connected}
+                  className="rounded-xl border border-white/10 bg-[#16273b] hover:bg-[#22354a] transition-all flex items-center justify-center gap-2 disabled:opacity-70"
+                >
                   {loadingSubscribe && <Loader2 className="w-4 h-4 animate-spin" />}
                   <Bell className="w-4 h-4" />
                   Subscribe
@@ -684,7 +727,7 @@ export default function MQTTConsolePage() {
                         </span>
                         {log.topic && <span className="text-cyan-300">[{log.topic}]</span>}
                         <span className="text-gray-300 break-all flex-1">
-                          {safeText(log.message)}
+                          {typeof log.message === "object" ? JSON.stringify(log.message) : String(log.message || "")}
                         </span>
                         <button onClick={() => copyLog(log)} className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white transition-all">
                           <Copy className="w-4 h-4" />
@@ -733,7 +776,7 @@ export default function MQTTConsolePage() {
                       <div>
                         <p className="text-sm text-gray-400">Last Latency</p>
                         <p className="text-3xl font-bold text-cyan-300">
-                          {safeText(latency)}
+                          {typeof latency === "object" ? JSON.stringify(latency) : String(latency)}
                         </p>
                       </div>
                     </div>
@@ -762,13 +805,13 @@ export default function MQTTConsolePage() {
                           <div className="flex items-center justify-between mb-3">
                             <div className="flex items-center gap-3">
                               <ShieldAlert className="w-5 h-5 text-red-300" />
-                              <h3 className="font-bold text-lg">{safeText(finding.title)}</h3>
+                              <h3 className="font-bold text-lg">{finding.title}</h3>
                             </div>
                             <span className={`px-3 py-1 rounded-full text-xs font-bold ${finding.severity === "CRITICAL" ? "bg-red-400/10 text-red-300" : finding.severity === "HIGH" ? "bg-orange-400/10 text-orange-300" : finding.severity === "MEDIUM" ? "bg-purple-400/10 text-purple-300" : "bg-cyan-400/10 text-cyan-300"}`}>
                               {finding.severity}
                             </span>
                           </div>
-                          <p className="text-gray-400 leading-relaxed">{safeText(finding.description)}</p>
+                          <p className="text-gray-400 leading-relaxed">{finding.description}</p>
                         </div>
                       ))
                     )}
